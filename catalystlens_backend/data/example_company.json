@@ -1,0 +1,85 @@
+{
+  "financial": {
+    "company_name": "NovaCure Therapeutics",
+    "ticker": "NCTX",
+    "cash_on_hand": 85000000,
+    "marketable_securities": 20000000,
+    "quarterly_operating_cash_burn": 28000000,
+    "quarterly_burn_history": [
+      { "quarter": "2023-Q1", "operating_cash_burn": 14500000 },
+      { "quarter": "2023-Q2", "operating_cash_burn": 17200000 },
+      { "quarter": "2023-Q3", "operating_cash_burn": 21800000 },
+      { "quarter": "2023-Q4", "operating_cash_burn": 28000000 }
+    ],
+    "market_cap": 320000000,
+    "debt": 15000000,
+    "going_concern_flag": false,
+    "recent_financing_flag": false,
+    "months_since_last_raise": 14,
+    "biotech_market_condition_score": 4.5,
+    "pipeline_concentration_score": 0.85
+  },
+  "clinical": {
+    "asset_name": "NCT-447 (KRAS G12C inhibitor)",
+    "indication": "Non-small cell lung cancer (NSCLC), KRAS G12C-mutant",
+    "trial_phase": "phase_2",
+    "trial_status": "recruiting",
+    "stated_months_to_catalyst": 18,
+    "enrollment_target": 120,
+    "enrollment_completed": 42,
+    "enrollment_rate_per_month": 6,
+    "number_of_sites": 14,
+    "indication_complexity_score": 0.55,
+    "endpoint_complexity_score": 0.60,
+    "regulatory_complexity_score": 0.50,
+    "catalyst_type": "primary_readout"
+  },
+  "success_probability": {
+    "trial_phase": "phase_2",
+    "positive_signals": [
+      "strong_preclinical_package",
+      "prior_human_signal",
+      "randomized_controlled_design",
+      "clinically_meaningful_endpoint"
+    ],
+    "negative_signals": [
+      "small_sample_size",
+      "high_competition",
+      "slow_enrollment"
+    ],
+    "custom_alpha_prior": null,
+    "custom_beta_prior": null
+  },
+  "valuation": {
+    "asset_value_success": 850000000,
+    "downside_value": 15000000,
+    "annual_discount_rate": 0.12,
+    "expected_dilution_if_refinanced": 0.30,
+    "financing_penalty_strength": 0.65
+  },
+  "disclosure": {
+    "company_narrative_distribution": {
+      "runway_strength": 0.75,
+      "clinical_timeline_confidence": 0.85,
+      "dilution_risk": 0.15,
+      "trial_maturity": 0.70,
+      "endpoint_strength": 0.80,
+      "pipeline_diversification": 0.20
+    },
+    "structured_audit_distribution": {
+      "runway_strength": 0.38,
+      "clinical_timeline_confidence": 0.45,
+      "dilution_risk": 0.68,
+      "trial_maturity": 0.35,
+      "endpoint_strength": 0.55,
+      "pipeline_diversification": 0.20
+    }
+  },
+  "simulation": {
+    "n_simulations": 10000,
+    "random_seed": 42,
+    "monthly_horizon": 48,
+    "baseline_lambda": 0.035,
+    "baseline_k": 1.3
+  }
+}

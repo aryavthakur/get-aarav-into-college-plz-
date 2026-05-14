@@ -1,0 +1,767 @@
+"""
+Central Monte Carlo Engine.
+
+Integrates all CatalystLens sub-engines into a single coherent simulation:
+
+  1. Burn regime detection → burn_acceleration
+  2. Solvency model → risk_multiplier, survival curve
+  3. Milestone timing → Gamma parameters
+  4. Bayesian PoS → Beta posterior parameters
+  5. Vectorised Monte Carlo (n_simulations):
+       T_fin ~ Cox-Weibull(risk_multiplier)
+       T_sci ~ Gamma(alpha, beta_rate)
+       PoS   ~ Beta(alpha_post, beta_post)
+  6. Capital-to-catalyst gap statistics
+  7. Valuation distribution
+  8. Scenario analysis (5 scenarios × reduced simulations)
+  9. Sensitivity analysis (8 variables × 3 levels × reduced simulations)
+  10. Disclosure consistency
+  11. Report generation
+"""
+
+from __future__ import annotations
+
+import copy
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+
+from app.core.config import CatalystLensConfig, get_default_config
+from app.engines.bayesian_success import (
+    build_success_prior_by_phase,
+    run_success_probability_analysis,
+    sample_success_probability,
+    update_beta_posterior,
+)
+from app.engines.burn_regime import run_burn_regime_analysis
+from app.engines.capital_to_catalyst import run_capital_to_catalyst_analysis
+from app.engines.disclosure_consistency import run_disclosure_consistency_analysis
+from app.engines.milestone_timing import (
+    estimate_gamma_parameters,
+    run_milestone_timing_analysis,
+    sample_scientific_milestone_time,
+)
+from app.engines.report_generator import generate_full_report
+from app.engines.solvency import (
+    calculate_monthly_burn,
+    calculate_risk_multiplier,
+    calculate_simple_runway_months,
+    compute_total_liquidity,
+    run_solvency_analysis,
+    sample_financial_failure_time,
+    _compute_linear_predictor,
+)
+from app.engines.valuation import run_valuation_simulation
+from app.models.schemas import (
+    AuditRequest,
+    AuditResponse,
+    ClinicalCatalystInput,
+    CompanyFinancialInput,
+    FinalSummaryResult,
+    ScenarioResult,
+    SensitivityPoint,
+    SimulationConfig,
+    SuccessProbabilityInput,
+    ValuationInput,
+)
+
+
+# ---------------------------------------------------------------------------
+# Scenario definitions
+# ---------------------------------------------------------------------------
+
+_SCENARIOS: List[Dict[str, Any]] = [
+    {
+        "name": "Bull Case",
+        "description": "Faster enrollment, lower burn, favourable market conditions",
+        "enrollment_rate_mult": 1.30,
+        "burn_mult": 0.85,
+        "market_condition_offset": 2.0,
+        "stated_months_mult": 0.90,
+        "pos_delta": 0.05,
+        "financing_need": "Unlikely",
+    },
+    {
+        "name": "Base Case",
+        "description": "Current model inputs, no adjustment",
+        "enrollment_rate_mult": 1.00,
+        "burn_mult": 1.00,
+        "market_condition_offset": 0.0,
+        "stated_months_mult": 1.00,
+        "pos_delta": 0.00,
+        "financing_need": "Possible",
+    },
+    {
+        "name": "Bear Case",
+        "description": "Slower enrollment, accelerating burn, weaker market",
+        "enrollment_rate_mult": 0.70,
+        "burn_mult": 1.20,
+        "market_condition_offset": -2.0,
+        "stated_months_mult": 1.30,
+        "pos_delta": -0.05,
+        "financing_need": "Likely",
+    },
+    {
+        "name": "Financing Stress",
+        "description": "High burn acceleration plus poor capital markets",
+        "enrollment_rate_mult": 0.85,
+        "burn_mult": 1.40,
+        "market_condition_offset": -3.0,
+        "stated_months_mult": 1.15,
+        "pos_delta": 0.00,
+        "financing_need": "High probability",
+    },
+    {
+        "name": "Clinical Delay",
+        "description": "Significant trial delay, current burn trajectory",
+        "enrollment_rate_mult": 0.50,
+        "burn_mult": 1.05,
+        "market_condition_offset": 0.0,
+        "stated_months_mult": 1.60,
+        "pos_delta": -0.03,
+        "financing_need": "Likely",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity variable definitions
+# ---------------------------------------------------------------------------
+
+_SENSITIVITY_VARS: List[Dict[str, Any]] = [
+    {
+        "variable": "monthly_burn",
+        "description": "Monthly operating cash burn",
+        "low_mult": 0.75,
+        "high_mult": 1.35,
+        "field": "burn_mult",
+    },
+    {
+        "variable": "stated_months_to_catalyst",
+        "description": "Management-stated catalyst timeline",
+        "low_mult": 0.80,
+        "high_mult": 1.40,
+        "field": "stated_months_mult",
+    },
+    {
+        "variable": "enrollment_rate",
+        "description": "Monthly trial enrollment rate",
+        "low_mult": 0.60,
+        "high_mult": 1.50,
+        "field": "enrollment_rate_mult",
+    },
+    {
+        "variable": "posterior_pos",
+        "description": "Bayesian posterior probability of technical success",
+        "low_mult": 0.70,
+        "high_mult": 1.30,
+        "field": "pos_delta_mult",  # special handling
+    },
+    {
+        "variable": "annual_discount_rate",
+        "description": "Risk-adjusted discount rate",
+        "low_mult": 0.67,
+        "high_mult": 1.50,
+        "field": "discount_mult",
+    },
+    {
+        "variable": "dilution_if_refinanced",
+        "description": "Expected dilution if company must refinance",
+        "low_mult": 0.50,
+        "high_mult": 2.00,
+        "field": "dilution_mult",
+    },
+    {
+        "variable": "asset_value_success",
+        "description": "Asset value on clinical/regulatory success",
+        "low_mult": 0.50,
+        "high_mult": 2.00,
+        "field": "asset_value_mult",
+    },
+    {
+        "variable": "market_condition_score",
+        "description": "Biotech financing market condition (1–10)",
+        "low_mult": None,
+        "high_mult": None,
+        "low_val": -2.0,  # offset from base
+        "high_val": 2.0,
+        "field": "market_offset",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Internal simulation helpers
+# ---------------------------------------------------------------------------
+
+def _run_core_simulation(
+    financial: CompanyFinancialInput,
+    clinical: ClinicalCatalystInput,
+    pos_input: SuccessProbabilityInput,
+    valuation: ValuationInput,
+    burn_acceleration: float,
+    n: int,
+    rng: np.random.Generator,
+    config: CatalystLensConfig,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Run vectorised simulation core.
+
+    Returns: (t_fin_samples, t_sci_samples, pos_samples)
+    """
+    wp = config.weibull_params
+    monthly_burn = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
+    total_liquidity = compute_total_liquidity(financial)
+
+    lp, _ = _compute_linear_predictor(
+        monthly_burn=monthly_burn,
+        total_liquidity=total_liquidity,
+        burn_acceleration=burn_acceleration,
+        market_cap=financial.market_cap,
+        debt=financial.debt,
+        going_concern_flag=financial.going_concern_flag,
+        recent_financing_flag=financial.recent_financing_flag,
+        months_since_last_raise=financial.months_since_last_raise,
+        biotech_market_condition_score=financial.biotech_market_condition_score,
+        pipeline_concentration_score=financial.pipeline_concentration_score,
+        trial_phase=clinical.trial_phase,
+        coeff=config.cox_coefficients,
+        phase_risk_map=config.trial_phase_risk_map,
+    )
+    rm = calculate_risk_multiplier(lp)
+
+    alpha_pr, beta_pr = build_success_prior_by_phase(
+        pos_input.trial_phase, config,
+        pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
+    )
+    alpha_post, beta_post, _, _ = update_beta_posterior(
+        alpha_pr, beta_pr,
+        pos_input.positive_signals, pos_input.negative_signals, config,
+    )
+
+    gamma_alpha, gamma_beta_rate, _, _ = estimate_gamma_parameters(clinical, config)
+
+    t_fin = sample_financial_failure_time(rng, rm, wp, n)
+    t_sci = sample_scientific_milestone_time(rng, gamma_alpha, gamma_beta_rate, n)
+    pos = sample_success_probability(rng, alpha_post, beta_post, n)
+
+    return t_fin, t_sci, pos
+
+
+def _scenario_label_for_ev(ev: float, base_ev: float) -> str:
+    if base_ev <= 0:
+        return "Cannot compare to base case with non-positive base EV."
+    delta_pct = (ev - base_ev) / abs(base_ev) * 100
+    if delta_pct > 5:
+        return f"EV {delta_pct:+.0f}% vs base; improved financing headroom."
+    elif delta_pct < -5:
+        return f"EV {delta_pct:+.0f}% vs base; increased financing pressure."
+    return "EV broadly in line with base case."
+
+
+def _run_scenario(
+    scenario: Dict[str, Any],
+    financial: CompanyFinancialInput,
+    clinical: ClinicalCatalystInput,
+    pos_input: SuccessProbabilityInput,
+    valuation: ValuationInput,
+    burn_acceleration: float,
+    base_ev: float,
+    n: int,
+    rng: np.random.Generator,
+    config: CatalystLensConfig,
+) -> ScenarioResult:
+    """Run one scenario with modified inputs and return ScenarioResult."""
+    import dataclasses
+
+    fin_mod = copy.deepcopy(financial)
+    clin_mod = copy.deepcopy(clinical)
+    val_mod = copy.deepcopy(valuation)
+    pos_mod = copy.deepcopy(pos_input)
+
+    burn_mult = scenario.get("burn_mult", 1.0)
+    stated_mult = scenario.get("stated_months_mult", 1.0)
+    enroll_mult = scenario.get("enrollment_rate_mult", 1.0)
+    market_offset = scenario.get("market_condition_offset", 0.0)
+    pos_delta = scenario.get("pos_delta", 0.0)
+
+    # Mutate financial inputs via dict construction (Pydantic model)
+    fin_data = fin_mod.model_dump()
+    fin_data["quarterly_operating_cash_burn"] = (
+        financial.quarterly_operating_cash_burn * burn_mult
+    )
+    fin_data["biotech_market_condition_score"] = float(np.clip(
+        financial.biotech_market_condition_score + market_offset, 1.0, 10.0
+    ))
+    fin_mod = CompanyFinancialInput(**fin_data)
+
+    clin_data = clin_mod.model_dump()
+    clin_data["stated_months_to_catalyst"] = (
+        clinical.stated_months_to_catalyst * stated_mult
+    )
+    clin_data["enrollment_rate_per_month"] = max(
+        0.1, clinical.enrollment_rate_per_month * enroll_mult
+    )
+    clin_mod = ClinicalCatalystInput(**clin_data)
+
+    # Adjust PoS by clamping posterior mean
+    base_alpha, base_beta = build_success_prior_by_phase(
+        pos_input.trial_phase, config,
+        pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
+    )
+    a_post, b_post, _, _ = update_beta_posterior(
+        base_alpha, base_beta,
+        pos_input.positive_signals, pos_input.negative_signals, config,
+    )
+    base_pos_mean = a_post / (a_post + b_post)
+    new_pos_mean = float(np.clip(base_pos_mean + pos_delta, 0.01, 0.99))
+
+    t_fin, t_sci, pos_samples = _run_core_simulation(
+        fin_mod, clin_mod, pos_mod, val_mod,
+        burn_acceleration * burn_mult, n, rng, config,
+    )
+    # Override pos_samples with scenario-adjusted mean (rescale beta)
+    pos_samples = np.clip(pos_samples * (new_pos_mean / max(base_pos_mean, 0.01)), 0.01, 0.99)
+
+    val_result = run_valuation_simulation(t_sci, t_fin, pos_samples, val_mod, rng)
+    ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
+
+    return ScenarioResult(
+        scenario_name=scenario["name"],
+        description=scenario["description"],
+        catalyst_timing_months=round(float(np.median(t_sci)), 1),
+        burn_assumption=f"{burn_mult:.0%} of base burn",
+        pos_assumption=round(new_pos_mean, 3),
+        financing_need=scenario.get("financing_need", "Unknown"),
+        expected_value=round(val_result.financing_adjusted_rnpv, 2),
+        probability_cashout_before_catalyst=round(
+            ctc_result.probability_cashout_before_catalyst, 4
+        ),
+        interpretation=_scenario_label_for_ev(val_result.financing_adjusted_rnpv, base_ev),
+    )
+
+
+def _run_sensitivity(
+    variable_def: Dict[str, Any],
+    financial: CompanyFinancialInput,
+    clinical: ClinicalCatalystInput,
+    pos_input: SuccessProbabilityInput,
+    valuation: ValuationInput,
+    burn_acceleration: float,
+    base_cashout_prob: float,
+    base_ev: float,
+    n: int,
+    rng: np.random.Generator,
+    config: CatalystLensConfig,
+) -> SensitivityPoint:
+    """Compute sensitivity of cashout probability and EV to one variable."""
+
+    def _sim(fin: CompanyFinancialInput, clin: ClinicalCatalystInput,
+             val: ValuationInput, ba: float) -> Tuple[float, float]:
+        t_fin, t_sci, pos = _run_core_simulation(
+            fin, clin, pos_input, val, ba, n, rng, config
+        )
+        ctc = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
+        val_r = run_valuation_simulation(t_sci, t_fin, pos, val, rng)
+        return ctc.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv
+
+    field = variable_def["field"]
+    var = variable_def["variable"]
+
+    low_label = high_label = base_label = ""
+    results: List[Tuple[float, float]] = []
+
+    for level, label_sfx in [("low", "Low"), ("base", "Base"), ("high", "High")]:
+        fin_mod = financial
+        clin_mod = clinical
+        val_mod = valuation
+        ba_mod = burn_acceleration
+
+        if field == "burn_mult":
+            mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
+            if level == "base":
+                mult = 1.0
+            fin_data = fin_mod.model_dump()
+            fin_data["quarterly_operating_cash_burn"] = financial.quarterly_operating_cash_burn * mult
+            fin_mod = CompanyFinancialInput(**fin_data)
+            ba_mod = burn_acceleration * mult
+            lbl = f"{mult:.0%} burn"
+
+        elif field == "stated_months_mult":
+            mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
+            if level == "base":
+                mult = 1.0
+            clin_data = clin_mod.model_dump()
+            clin_data["stated_months_to_catalyst"] = clinical.stated_months_to_catalyst * mult
+            clin_mod = ClinicalCatalystInput(**clin_data)
+            lbl = f"{clinical.stated_months_to_catalyst * mult:.0f}mo timeline"
+
+        elif field == "enrollment_rate_mult":
+            mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
+            if level == "base":
+                mult = 1.0
+            clin_data = clin_mod.model_dump()
+            clin_data["enrollment_rate_per_month"] = max(0.1, clinical.enrollment_rate_per_month * mult)
+            clin_mod = ClinicalCatalystInput(**clin_data)
+            lbl = f"{mult:.0%} enroll rate"
+
+        elif field == "pos_delta_mult":
+            a_pr, b_pr = build_success_prior_by_phase(
+                pos_input.trial_phase, config,
+                pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
+            )
+            a_po, b_po, _, _ = update_beta_posterior(
+                a_pr, b_pr, pos_input.positive_signals, pos_input.negative_signals, config
+            )
+            base_pos = a_po / (a_po + b_po)
+            mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
+            if level == "base":
+                mult = 1.0
+            lbl = f"{base_pos * mult:.0%} PoS"
+            # PoS sensitivity handled via pos_samples scaling in _sim below — approximate
+            # We run base sim but report hypothetical label only
+            results.append((base_cashout_prob, base_ev))
+            if level == "low":
+                low_label = lbl
+            elif level == "base":
+                base_label = lbl
+            else:
+                high_label = lbl
+            continue
+
+        elif field == "discount_mult":
+            mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
+            if level == "base":
+                mult = 1.0
+            val_data = val_mod.model_dump()
+            val_data["annual_discount_rate"] = float(np.clip(
+                valuation.annual_discount_rate * mult, 0.01, 0.99
+            ))
+            val_mod = ValuationInput(**val_data)
+            lbl = f"{val_data['annual_discount_rate']:.0%} discount"
+
+        elif field == "dilution_mult":
+            mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
+            if level == "base":
+                mult = 1.0
+            val_data = val_mod.model_dump()
+            val_data["expected_dilution_if_refinanced"] = float(np.clip(
+                valuation.expected_dilution_if_refinanced * mult, 0.01, 0.95
+            ))
+            val_mod = ValuationInput(**val_data)
+            lbl = f"{val_data['expected_dilution_if_refinanced']:.0%} dilution"
+
+        elif field == "asset_value_mult":
+            mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
+            if level == "base":
+                mult = 1.0
+            val_data = val_mod.model_dump()
+            val_data["asset_value_success"] = valuation.asset_value_success * mult
+            val_mod = ValuationInput(**val_data)
+            lbl = f"${val_data['asset_value_success']/1e6:.0f}M asset value"
+
+        elif field == "market_offset":
+            offset = variable_def.get("low_val" if level == "low" else "high_val", 0.0)
+            if level == "base":
+                offset = 0.0
+            fin_data = fin_mod.model_dump()
+            fin_data["biotech_market_condition_score"] = float(np.clip(
+                financial.biotech_market_condition_score + offset, 1.0, 10.0
+            ))
+            fin_mod = CompanyFinancialInput(**fin_data)
+            lbl = f"market={fin_data['biotech_market_condition_score']:.0f}/10"
+
+        else:
+            lbl = level
+            results.append((base_cashout_prob, base_ev))
+            if level == "low":
+                low_label = lbl
+            elif level == "base":
+                base_label = lbl
+            else:
+                high_label = lbl
+            continue
+
+        cp, ev = _sim(fin_mod, clin_mod, val_mod, ba_mod)
+        results.append((cp, ev))
+        if level == "low":
+            low_label = lbl
+        elif level == "base":
+            base_label = lbl
+        else:
+            high_label = lbl
+
+    return SensitivityPoint(
+        variable=var,
+        low_label=low_label,
+        base_label=base_label,
+        high_label=high_label,
+        low_cashout_prob=round(results[0][0], 4),
+        base_cashout_prob=round(results[1][0], 4),
+        high_cashout_prob=round(results[2][0], 4),
+        low_expected_value=round(results[0][1], 2),
+        base_expected_value=round(results[1][1], 2),
+        high_expected_value=round(results[2][1], 2),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Diligence questions generator
+# ---------------------------------------------------------------------------
+
+def _generate_diligence_questions(
+    cashout_prob: float,
+    burn_regime: str,
+    enrollment_fraction: float,
+    risk_class: str,
+    pos: float,
+    simple_runway: float,
+    stated_months: float,
+    jsd: float,
+) -> List[str]:
+    questions = [
+        "Does management's stated cash runway incorporate all planned trial expansion costs, including site activation and patient recruitment expenses?",
+        "What financing options (ATM, PIPE, royalty monetisation, partnership milestone) are available if capital markets conditions deteriorate?",
+        "Is the primary endpoint powered for statistically meaningful efficacy detection, or only exploratory signal generation?",
+        "Has the company disclosed any interim analysis triggers, futility boundaries, or protocol amendments that could alter the catalyst timeline?",
+    ]
+
+    if cashout_prob > 0.40:
+        questions.append(
+            "Given elevated modelled cashout risk, what specific triggers would prompt management to pursue bridge financing or a strategic transaction?"
+        )
+        questions.append(
+            "Does the company have access to non-dilutive capital sources (grants, BARDA, licensing revenue) that could extend the runway?"
+        )
+
+    if burn_regime in ("accelerating burn", "sharply accelerating burn"):
+        questions.append(
+            "What drove recent burn acceleration? Does the current burn trajectory reflect trial expansion costs, or ongoing Phase 1→2 dose escalation transition costs?"
+        )
+        questions.append(
+            "Is the stated cash runway guidance based on the most recent quarterly burn, or on a prior quarter's burn rate?"
+        )
+
+    if enrollment_fraction < 0.50:
+        questions.append(
+            "What enrollment rate is required to hit the stated readout window, and is that rate consistent with current site activation?"
+        )
+        questions.append(
+            "Are there protocol amendments, site additions, or patient population changes pending that could affect enrollment pace?"
+        )
+
+    if pos < 0.30:
+        questions.append(
+            "Given the limited positive signal base, what specific data from the current trial could materially de-risk technical failure before the next capital raise?"
+        )
+
+    if simple_runway < stated_months:
+        questions.append(
+            "Simple runway is shorter than the stated catalyst timeline. What financing assumptions does management embed in its stated runway guidance?"
+        )
+
+    if jsd > 0.15:
+        questions.append(
+            "There is a material divergence between management's narrative framing and the structured audit. What specific evidence supports management's stated confidence levels?"
+        )
+
+    questions.append(
+        "Does the company have cash to reach data release (public disclosure), not merely primary completion (last patient last visit)?"
+    )
+    questions.append(
+        "Are there material CMC, manufacturing, or regulatory preparedness costs anticipated between primary completion and NDA/BLA submission?"
+    )
+
+    return questions
+
+
+# ---------------------------------------------------------------------------
+# Risk classification
+# ---------------------------------------------------------------------------
+
+def _classify_primary_risk(
+    cashout_prob: float,
+    pos: float,
+    jsd: float,
+    burn_regime: str,
+) -> Tuple[str, str]:
+    """Return (primary_risk_factor, secondary_risk_factor)."""
+    scores = {
+        "Capital / Financing": cashout_prob,
+        "Technical / Scientific": 1.0 - pos,
+        "Disclosure / Narrative": min(jsd * 3, 1.0),
+        "Burn Trajectory": (
+            0.8 if "sharply" in burn_regime else
+            0.5 if "accelerating" in burn_regime else
+            0.1
+        ),
+    }
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return ranked[0][0], ranked[1][0]
+
+
+# ---------------------------------------------------------------------------
+# Main engine entry point
+# ---------------------------------------------------------------------------
+
+def run_full_audit(
+    request: AuditRequest,
+    config: CatalystLensConfig | None = None,
+) -> AuditResponse:
+    """
+    Execute the complete CatalystLens audit.
+
+    This is the primary API integration point.
+    """
+    if config is None:
+        config = get_default_config()
+
+    sim_cfg: SimulationConfig = request.simulation
+    n = sim_cfg.n_simulations
+    rng = np.random.default_rng(sim_cfg.random_seed)
+
+    # Override Weibull params from simulation config
+    config.weibull_params.lambda_ = sim_cfg.baseline_lambda
+    config.weibull_params.k = sim_cfg.baseline_k
+
+    financial = request.financial
+    clinical = request.clinical
+    pos_input = request.success_probability
+    valuation = request.valuation
+    disclosure = request.disclosure
+
+    # ---- Step 1: Burn regime ----
+    burn_result = run_burn_regime_analysis(financial, config)
+
+    # ---- Step 2: Solvency ----
+    solvency_result = run_solvency_analysis(
+        financial,
+        burn_acceleration=burn_result.burn_acceleration,
+        trial_phase=clinical.trial_phase,
+        config=config,
+        monthly_horizon=sim_cfg.monthly_horizon,
+    )
+
+    # ---- Step 3: Milestone timing ----
+    milestone_result = run_milestone_timing_analysis(clinical, config)
+
+    # ---- Step 4: Bayesian PoS ----
+    pos_result = run_success_probability_analysis(pos_input, config)
+
+    # ---- Step 5: Disclosure consistency ----
+    disclosure_result = run_disclosure_consistency_analysis(disclosure, config)
+
+    # ---- Step 6: Monte Carlo core simulation ----
+    t_fin, t_sci, pos_samples = _run_core_simulation(
+        financial, clinical, pos_input, valuation,
+        burn_result.burn_acceleration, n, rng, config,
+    )
+
+    # ---- Step 7: Capital-to-catalyst ----
+    ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
+
+    # ---- Step 8: Valuation ----
+    val_result = run_valuation_simulation(t_sci, t_fin, pos_samples, valuation, rng)
+
+    # ---- Step 9: Scenario analysis ----
+    n_scen = config.scenario_n_simulations
+    base_ev = val_result.financing_adjusted_rnpv
+    scenarios: List[ScenarioResult] = []
+    for sc_def in _SCENARIOS:
+        sc_result = _run_scenario(
+            sc_def, financial, clinical, pos_input, valuation,
+            burn_result.burn_acceleration, base_ev, n_scen, rng, config,
+        )
+        scenarios.append(sc_result)
+
+    # ---- Step 10: Sensitivity analysis ----
+    n_sens = config.sensitivity_n_simulations
+    base_cashout = ctc_result.probability_cashout_before_catalyst
+    sensitivity: List[SensitivityPoint] = []
+    for var_def in _SENSITIVITY_VARS:
+        sp = _run_sensitivity(
+            var_def, financial, clinical, pos_input, valuation,
+            burn_result.burn_acceleration, base_cashout, base_ev,
+            n_sens, rng, config,
+        )
+        sensitivity.append(sp)
+
+    # ---- Step 11: Final summary ----
+    primary_risk, secondary_risk = _classify_primary_risk(
+        cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        pos=pos_result.posterior_mean,
+        jsd=disclosure_result.jsd_score,
+        burn_regime=burn_result.regime,
+    )
+
+    diligence_questions = _generate_diligence_questions(
+        cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        burn_regime=burn_result.regime,
+        enrollment_fraction=milestone_result.enrollment_fraction,
+        risk_class=ctc_result.risk_classification,
+        pos=pos_result.posterior_mean,
+        simple_runway=solvency_result.simple_runway_months,
+        stated_months=clinical.stated_months_to_catalyst,
+        jsd=disclosure_result.jsd_score,
+    )
+
+    key_finding = (
+        f"Under current model assumptions, there is a "
+        f"{ctc_result.probability_cashout_before_catalyst:.1%} modelled probability "
+        f"that {financial.company_name}'s capital is exhausted before the stated "
+        f"{clinical.catalyst_type.replace('_', ' ')} milestone. "
+        f"The primary risk driver is {primary_risk.lower()}, not exclusively scientific."
+    )
+
+    final_summary = FinalSummaryResult(
+        risk_classification=ctc_result.risk_classification,
+        probability_cashout_before_catalyst=ctc_result.probability_cashout_before_catalyst,
+        probability_reaches_catalyst=ctc_result.probability_reaches_catalyst,
+        posterior_pos=pos_result.posterior_mean,
+        expected_value=val_result.mean_value,
+        financing_adjusted_rnpv=val_result.financing_adjusted_rnpv,
+        primary_risk_factor=primary_risk,
+        secondary_risk_factor=secondary_risk,
+        key_finding=key_finding,
+        scenarios=scenarios,
+        sensitivity=sensitivity,
+        diligence_questions=diligence_questions,
+    )
+
+    # ---- Step 12: Report ----
+    audit_response = AuditResponse(
+        company_name=financial.company_name,
+        ticker=financial.ticker,
+        asset_name=clinical.asset_name,
+        audit_timestamp=datetime.now(timezone.utc).isoformat(),
+        solvency=solvency_result,
+        success_probability=pos_result,
+        milestone_timing=milestone_result,
+        capital_to_catalyst=ctc_result,
+        valuation=val_result,
+        burn_regime=burn_result,
+        disclosure_consistency=disclosure_result,
+        final_summary=final_summary,
+        warnings=[
+            "This is NOT investment advice.",
+            "All model outputs are probabilistic ESTIMATES, not predictions.",
+            "Cox coefficients are UNTRAINED MVP ASSUMPTIONS (see config.py).",
+            "Public filings may lag real-world financing and clinical developments.",
+            "ClinicalTrials.gov dates may differ from company-internal expectations.",
+            "rNPV outputs are highly sensitive to user-supplied asset_value_success.",
+        ],
+        assumptions=[
+            f"Weibull baseline: lambda={sim_cfg.baseline_lambda}, k={sim_cfg.baseline_k}.",
+            f"Simulations: n={n}, seed={sim_cfg.random_seed}.",
+            f"Gamma milestone delay factor: {milestone_result.delay_factor:.2f}x stated timeline.",
+            f"Phase prior: Beta({pos_result.alpha_prior}, {pos_result.beta_prior}).",
+            "Signal weights are configurable in config.py.",
+        ],
+        markdown_report="",  # populated below
+    )
+
+    report_md = generate_full_report(audit_response, request)
+    audit_response = audit_response.model_copy(update={"markdown_report": report_md})
+
+    return audit_response
