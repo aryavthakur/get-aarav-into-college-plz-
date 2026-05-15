@@ -47,6 +47,15 @@ from app.engines.milestone_timing import (
     sample_scientific_milestone_time,
 )
 from app.engines.report_generator import generate_full_report
+from app.engines.multistate import (
+    CAUSE_NAMES,
+    CAUSE_TO_VALUATION_STATE,
+    DEFAULT_CAUSE_SCALES,
+    build_cause_lp,
+    cif_at_time,
+    compute_overall_survival,
+    sample_competing_risk,
+)
 from app.engines.solvency import (
     calculate_monthly_burn,
     calculate_risk_multiplier,
@@ -57,6 +66,7 @@ from app.engines.solvency import (
     _compute_linear_predictor,
 )
 from app.engines.valuation import run_valuation_simulation
+from app.engines.value_of_information import run_value_of_information_analysis
 from app.models.schemas import (
     AuditRequest,
     AuditResponse,
@@ -68,14 +78,17 @@ from app.models.schemas import (
     FinancingEventInput,
     FinalSummaryResult,
     ModelVersionInfo,
+    MultiStateResult,
     ProvenanceBundle,
     ProvenanceItem,
     ScenarioResult,
     SensitivityPoint,
+    SignalEVSISchema,
     SimulationConfig,
     SuccessProbabilityInput,
     ValuationInput,
     ValidationSnapshot,
+    ValueOfInformationResult,
 )
 
 
@@ -269,7 +282,8 @@ def _run_core_simulation(
     pos_alpha_override: Optional[float] = None,
     pos_beta_override: Optional[float] = None,
     min_sci_months: float = 0.1,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    use_multistate: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Run vectorised simulation core.
 
@@ -278,7 +292,9 @@ def _run_core_simulation(
     min_sci_months floors t_sci samples at the minimum feasible public readout
     timeline (enrollment + follow-up + cleaning + analysis + disclosure lag).
 
-    Returns: (t_fin_samples, t_sci_samples, pos_samples)
+    use_multistate=False (default): returns (t_fin, t_sci, pos) — backwards compatible.
+    use_multistate=True: returns (t_fin, t_sci, pos, cause_array) where cause_array
+      is shape (n,) with integer cause IDs 1–7.
     """
     wp = config.weibull_params
     monthly_burn = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
@@ -312,11 +328,19 @@ def _run_core_simulation(
 
     gamma_alpha, gamma_beta_rate, _, _ = estimate_gamma_parameters(clinical, config)
 
-    t_fin = sample_financial_failure_time(rng, rm, wp, n)
     t_sci = sample_scientific_milestone_time(rng, gamma_alpha, gamma_beta_rate, n, min_months=min_sci_months)
     pos = sample_success_probability(rng, alpha_post, beta_post, n)
 
-    return t_fin, t_sci, pos
+    if use_multistate:
+        # Build cause-specific linear predictors from the aggregate LP
+        cause_lp = build_cause_lp(lp, list(DEFAULT_CAUSE_SCALES.keys()))
+        samples = sample_competing_risk(DEFAULT_CAUSE_SCALES, cause_lp, rng, n)
+        t_fin = samples[:, 0]
+        cause_array = samples[:, 1].astype(np.int32)
+        return t_fin, t_sci, pos, cause_array
+    else:
+        t_fin = sample_financial_failure_time(rng, rm, wp, n)
+        return t_fin, t_sci, pos
 
 
 def _scenario_label_for_ev(ev: float, base_ev: float) -> str:
@@ -921,11 +945,21 @@ def run_full_audit(
     disclosure_result = run_disclosure_consistency_analysis(disclosure, config)
 
     # ---- Step 6: Monte Carlo core simulation ----
-    t_fin, t_sci, pos_samples = _run_core_simulation(
-        financial, clinical, pos_input, valuation,
-        burn_result.burn_acceleration, n, streams.financing, config,
-        min_sci_months=milestone_result.public_readout_months,
-    )
+    use_ms = sim_cfg.use_multistate
+    if use_ms:
+        t_fin, t_sci, pos_samples, cause_array = _run_core_simulation(
+            financial, clinical, pos_input, valuation,
+            burn_result.burn_acceleration, n, streams.financing, config,
+            min_sci_months=milestone_result.public_readout_months,
+            use_multistate=True,
+        )
+    else:
+        t_fin, t_sci, pos_samples = _run_core_simulation(
+            financial, clinical, pos_input, valuation,
+            burn_result.burn_acceleration, n, streams.financing, config,
+            min_sci_months=milestone_result.public_readout_months,
+        )
+        cause_array = None
     t_fin, cash_path_result = apply_cash_path_cap(
         t_fin, financial, sim_cfg, streams.cash,
         catalyst_month=milestone_result.public_readout_months,
@@ -1008,7 +1042,87 @@ def run_full_audit(
         diligence_questions=diligence_questions,
     )
 
-    # ---- Step 12: Report ----
+    # ---- Step 12: Multi-state result (optional) ----
+    multi_state_result: MultiStateResult | None = None
+    if use_ms and cause_array is not None:
+        # Compute aggregate LP for CIF
+        monthly_burn_ms = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
+        total_liq_ms = compute_total_liquidity(financial)
+        _lp_val, _ = _compute_linear_predictor(
+            monthly_burn=monthly_burn_ms,
+            total_liquidity=total_liq_ms,
+            burn_acceleration=burn_result.burn_acceleration,
+            market_cap=financial.market_cap,
+            debt=financial.debt,
+            going_concern_flag=financial.going_concern_flag,
+            recent_financing_flag=financial.recent_financing_flag,
+            months_since_last_raise=financial.months_since_last_raise,
+            biotech_market_condition_score=financial.biotech_market_condition_score,
+            pipeline_concentration_score=financial.pipeline_concentration_score,
+            trial_phase=clinical.trial_phase,
+            coeff=config.cox_coefficients,
+            phase_risk_map=config.trial_phase_risk_map,
+        )
+        cause_lp_ms = build_cause_lp(_lp_val, list(DEFAULT_CAUSE_SCALES.keys()))
+        # Absorbing state probabilities from simulation
+        absorbed_mask = t_fin <= sim_cfg.monthly_horizon
+        absorbed_causes = cause_array[absorbed_mask]
+        abs_probs: dict[str, float] = {}
+        for cid, name in CAUSE_NAMES.items():
+            abs_probs[name] = round(float(np.sum(absorbed_causes == cid)) / n, 4)
+        still_operating = round(float(np.sum(~absorbed_mask)) / n, 4)
+        # Median transition time
+        absorbed_times = t_fin[absorbed_mask]
+        median_t = float(np.median(absorbed_times)) if len(absorbed_times) > 0 else None
+        # CIF at catalyst month
+        cat_month = milestone_result.public_readout_months
+        cif_cat = cif_at_time(cat_month, DEFAULT_CAUSE_SCALES, cause_lp_ms)
+        cif_cat_named = {CAUSE_NAMES[cid]: round(v, 4) for cid, v in cif_cat.items()}
+        s_cat = float(compute_overall_survival(
+            np.array([cat_month]), DEFAULT_CAUSE_SCALES, cause_lp_ms
+        )[0])
+        multi_state_result = MultiStateResult(
+            absorbing_state_probs=abs_probs,
+            overall_survival_at_horizon=still_operating,
+            median_transition_time=round(median_t, 1) if median_t else None,
+            cif_at_catalyst_month=cif_cat_named,
+            overall_survival_at_catalyst_month=round(s_cat, 4),
+            model_assumptions=[
+                "Multi-state competing-risk Weibull model with 7 absorbing causes.",
+                "Cause LPs derived from aggregate Cox LP via differential weighting.",
+                "Scale parameters are MVP defaults; not fit to historical outcome data.",
+            ],
+        )
+
+    # ---- Step 13: Value of Information ----
+    voi_raw = run_value_of_information_analysis(
+        alpha_posterior=pos_result.alpha_posterior,
+        beta_posterior=pos_result.beta_posterior,
+        financing_adjusted_rnpv=val_result.financing_adjusted_rnpv,
+    )
+    voi_result = ValueOfInformationResult(
+        evpi_dollars=voi_raw.evpi_dollars,
+        evpi_pct_of_ev=voi_raw.evpi_pct_of_ev,
+        evpi_interpretation=voi_raw.evpi_interpretation,
+        per_signal_evsi=[
+            SignalEVSISchema(
+                signal_name=s.signal_name,
+                description=s.description,
+                category=s.category,
+                signal_weight=s.signal_weight,
+                evsi_dollars=s.evsi_dollars,
+                ev_if_positive=s.ev_if_positive,
+                ev_if_negative=s.ev_if_negative,
+                p_positive=s.p_positive,
+            )
+            for s in voi_raw.per_signal_evsi
+        ],
+        top_diligence_priority=voi_raw.top_diligence_priority,
+        total_observable_evsi=voi_raw.total_observable_evsi,
+        methodology_note=voi_raw.methodology_note,
+    )
+
+    # ---- Step 14: Report ----
     audit_response = AuditResponse(
         company_name=financial.company_name,
         ticker=financial.ticker,
@@ -1027,6 +1141,8 @@ def run_full_audit(
         burn_regime=burn_result,
         disclosure_consistency=disclosure_result,
         final_summary=final_summary,
+        multi_state=multi_state_result,
+        value_of_information=voi_result,
         warnings=[
             "This is NOT investment advice.",
             "All model outputs are probabilistic ESTIMATES, not predictions.",

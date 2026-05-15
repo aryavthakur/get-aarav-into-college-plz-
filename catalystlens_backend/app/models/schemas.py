@@ -211,6 +211,13 @@ class SimulationConfig(BaseModel):
     monthly_horizon: int = Field(48, ge=12, le=120)
     baseline_lambda: float = Field(0.035, gt=0)
     baseline_k: float = Field(1.30, gt=0)
+    use_multistate: bool = Field(
+        False,
+        description=(
+            "Enable multi-state competing-risk engine (8 absorbing states). "
+            "When False, uses the legacy binary Cox-Weibull sampler."
+        ),
+    )
 
 
 class AuditRequest(BaseModel):
@@ -477,6 +484,49 @@ class FinalSummaryResult(BaseModel):
     diligence_questions: List[str]
 
 
+class MultiStateResult(BaseModel):
+    """Output of the multi-state competing-risk engine (8 absorbing states)."""
+    absorbing_state_probs: Dict[str, float] = Field(
+        description="Fraction of simulation paths absorbed into each state by horizon end",
+    )
+    overall_survival_at_horizon: float = Field(
+        description="S(horizon): fraction of paths still in operating state at end of horizon",
+    )
+    median_transition_time: Optional[float] = Field(
+        None, description="Median time to absorption across all causes (months)",
+    )
+    cif_at_catalyst_month: Dict[str, float] = Field(
+        default_factory=dict,
+        description="CIF_j(catalyst_month) for each cause; empty when catalyst_month is None",
+    )
+    overall_survival_at_catalyst_month: Optional[float] = Field(
+        None, description="S(catalyst_month): probability of being in operating state at catalyst",
+    )
+    model_assumptions: List[str] = Field(default_factory=list)
+
+
+class SignalEVSISchema(BaseModel):
+    signal_name: str
+    description: str
+    category: str
+    signal_weight: float
+    evsi_dollars: float
+    ev_if_positive: float
+    ev_if_negative: float
+    p_positive: float
+
+
+class ValueOfInformationResult(BaseModel):
+    """EVPI and per-signal EVSI for diligence prioritization."""
+    evpi_dollars: float
+    evpi_pct_of_ev: float
+    evpi_interpretation: str
+    per_signal_evsi: List[SignalEVSISchema]
+    top_diligence_priority: str
+    total_observable_evsi: float
+    methodology_note: str
+
+
 class DataQualityResult(BaseModel):
     financial_data_completeness: float = Field(ge=0.0, le=1.0)
     clinical_data_completeness: float = Field(ge=0.0, le=1.0)
@@ -533,6 +583,8 @@ class AuditResponse(BaseModel):
     burn_regime: BurnRegimeResult
     disclosure_consistency: DisclosureConsistencyResult
     final_summary: FinalSummaryResult
+    multi_state: Optional[MultiStateResult] = None
+    value_of_information: Optional[ValueOfInformationResult] = None
     warnings: List[str]
     assumptions: List[str]
     markdown_report: str

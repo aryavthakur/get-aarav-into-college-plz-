@@ -914,6 +914,101 @@ def _provenance_appendix(r: AuditResponse) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Value of Information section
+# ---------------------------------------------------------------------------
+
+def _value_of_information_section(r: AuditResponse) -> str:
+    voi = r.value_of_information
+    if voi is None:
+        return ""
+
+    rows = "\n".join(
+        f"| {s.signal_name.replace('_', ' ').title()} | {s.category.title()} "
+        f"| {s.signal_weight:.1f} | {_fmt_m(s.evsi_dollars)} "
+        f"| {_fmt_m(s.ev_if_positive)} | {_fmt_m(s.ev_if_negative)} |"
+        for s in voi.per_signal_evsi[:8]  # top 8 signals
+    )
+
+    return f"""## U. Expected Value of Information (EVPI / EVSI)
+
+### Overview
+
+{voi.evpi_interpretation}
+
+| Metric | Value |
+|---|---:|
+| EVPI (perfect clinical outcome info) | {_fmt_m(voi.evpi_dollars)} ({voi.evpi_pct_of_ev:.1f}% of EV) |
+| Top diligence signal | {voi.top_diligence_priority} |
+| Total EVSI across all signals | {_fmt_m(voi.total_observable_evsi)} |
+
+### Diligence Signal Prioritisation (ranked by EVSI)
+
+| Signal | Category | Weight | EVSI | EV if Positive | EV if Negative |
+|---|---|---:|---:|---:|---:|
+{rows}
+
+### Methodology Note
+
+*{voi.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# Multi-state competing-risk section
+# ---------------------------------------------------------------------------
+
+def _multistate_section(r: AuditResponse) -> str:
+    ms = r.multi_state
+    if ms is None:
+        return ""
+
+    state_rows = "\n".join(
+        f"| {name.replace('_', ' ').title()} | {prob:.1%} |"
+        for name, prob in sorted(ms.absorbing_state_probs.items(), key=lambda x: -x[1])
+    )
+
+    cif_rows = "\n".join(
+        f"| {name.replace('_', ' ').title()} | {prob:.1%} |"
+        for name, prob in sorted(ms.cif_at_catalyst_month.items(), key=lambda x: -x[1])
+    )
+
+    survival_note = (
+        f"{ms.overall_survival_at_catalyst_month:.1%} probability of still being in the "
+        f"operating (unfunded) state at the catalyst month."
+        if ms.overall_survival_at_catalyst_month is not None else ""
+    )
+
+    median_note = (
+        f"Median time to absorption across all causes: **{ms.median_transition_time:.1f} months**."
+        if ms.median_transition_time is not None else ""
+    )
+
+    assumptions = "\n".join(f"- {a}" for a in (ms.model_assumptions or []))
+
+    return f"""## V. Multi-State Competing-Risk Analysis
+
+### Absorbing State Probabilities (by Horizon End)
+
+| State | Probability |
+|---|---:|
+{state_rows}
+| Still Operating (no event) | {ms.overall_survival_at_horizon:.1%} |
+
+{median_note}
+
+### Cumulative Incidence at Catalyst Month
+
+{survival_note}
+
+| Cause | CIF at Catalyst Month |
+|---|---:|
+{cif_rows}
+
+### Model Assumptions
+
+{assumptions}"""
+
+
+# ---------------------------------------------------------------------------
 # Master report assembler
 # ---------------------------------------------------------------------------
 
@@ -942,8 +1037,10 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
         _scenario_section(r, req),
         _sensitivity_section(r, req),
         _diligence_questions_section(r),
+        _value_of_information_section(r),
+        _multistate_section(r),
         _assumptions_section(r),
         _provenance_appendix(r),
         _conclusion_section(r, req),
     ]
-    return "\n\n---\n\n".join(sections)
+    return "\n\n---\n\n".join(s for s in sections if s)
