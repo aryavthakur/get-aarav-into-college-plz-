@@ -484,6 +484,37 @@ class FinalSummaryResult(BaseModel):
     diligence_questions: List[str]
 
 
+class RealOptionsResult(BaseModel):
+    """Real-options valuation output (compound option on clinical success)."""
+    rov_mean: float
+    rov_median: float
+    rov_p5: float
+    rov_p95: float
+    rnpv_static: float
+    real_options_premium: float
+    real_options_premium_pct: float
+    abandonment_value: float
+    model_assumptions: List[str]
+
+
+class ShapleyComponentSchema(BaseModel):
+    driver: str
+    description: str
+    cashout_prob_shapley: float
+    ev_shapley: float
+    rank: int
+
+
+class RiskAttributionResult(BaseModel):
+    """Shapley-based decomposition of cashout probability and EV uncertainty."""
+    components: List[ShapleyComponentSchema]
+    total_cashout_prob: float
+    total_ev: float
+    explained_cashout_prob: float
+    explained_ev: float
+    methodology_note: str
+
+
 class MultiStateResult(BaseModel):
     """Output of the multi-state competing-risk engine (8 absorbing states)."""
     absorbing_state_probs: Dict[str, float] = Field(
@@ -585,6 +616,8 @@ class AuditResponse(BaseModel):
     final_summary: FinalSummaryResult
     multi_state: Optional[MultiStateResult] = None
     value_of_information: Optional[ValueOfInformationResult] = None
+    real_options: Optional[RealOptionsResult] = None
+    risk_attribution: Optional[RiskAttributionResult] = None
     warnings: List[str]
     assumptions: List[str]
     markdown_report: str

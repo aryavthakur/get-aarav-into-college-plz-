@@ -953,6 +953,73 @@ def _value_of_information_section(r: AuditResponse) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Real-options valuation section
+# ---------------------------------------------------------------------------
+
+def _real_options_section(r: AuditResponse) -> str:
+    ro = r.real_options
+    if ro is None:
+        return ""
+
+    prem_sign = "+" if ro.real_options_premium >= 0 else ""
+
+    assumptions = "\n".join(f"- {a}" for a in (ro.model_assumptions or []))
+
+    return f"""## W. Real-Options Valuation
+
+The program is modelled as a compound real option: the right (not obligation) to
+invest in full development at the clinical catalyst, with the underlying asset
+value following GBM with sigma={60:.0f}%.
+
+| Metric | Value |
+|---|---:|
+| ROV Mean | {_fmt_m(ro.rov_mean)} |
+| ROV Median | {_fmt_m(ro.rov_median)} |
+| ROV P5 / P95 | {_fmt_m(ro.rov_p5)} / {_fmt_m(ro.rov_p95)} |
+| Static rNPV (PoS × V × discount) | {_fmt_m(ro.rnpv_static)} |
+| Real-Options Premium | {prem_sign}{_fmt_m(ro.real_options_premium)} ({prem_sign}{ro.real_options_premium_pct:.1f}%) |
+| Abandonment Option Value | {_fmt_m(ro.abandonment_value)} |
+
+The real-options premium is the additional value from being able to abandon the
+program on failure rather than being forced to pay the full investment cost regardless
+of clinical outcome.
+
+### Model Assumptions
+
+{assumptions}"""
+
+
+# ---------------------------------------------------------------------------
+# Shapley risk attribution section
+# ---------------------------------------------------------------------------
+
+def _risk_attribution_section(r: AuditResponse) -> str:
+    ra = r.risk_attribution
+    if ra is None or not ra.components:
+        return ""
+
+    rows = "\n".join(
+        f"| {c.rank} | {c.driver.replace('_', ' ').title()} | {c.description} "
+        f"| {c.cashout_prob_shapley:+.1%} | {_fmt_m(c.ev_shapley)} |"
+        for c in sorted(ra.components, key=lambda x: x.rank)
+    )
+
+    return f"""## X. Shapley Risk Attribution
+
+Approximate Shapley decomposition of cashout probability and EV uncertainty
+across the {len(ra.components)} primary risk drivers.
+
+| Rank | Driver | Description | Cashout Prob Contribution | EV Contribution |
+|---:|---|---|---:|---:|
+{rows}
+
+**Total explained cashout probability shift:** {ra.explained_cashout_prob:+.1%}
+**Total explained EV shift:** {_fmt_m(ra.explained_ev)}
+
+*{ra.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
 # Multi-state competing-risk section
 # ---------------------------------------------------------------------------
 
@@ -1038,6 +1105,8 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
         _sensitivity_section(r, req),
         _diligence_questions_section(r),
         _value_of_information_section(r),
+        _real_options_section(r),
+        _risk_attribution_section(r),
         _multistate_section(r),
         _assumptions_section(r),
         _provenance_appendix(r),

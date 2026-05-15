@@ -66,6 +66,8 @@ from app.engines.solvency import (
     _compute_linear_predictor,
 )
 from app.engines.valuation import run_valuation_simulation
+from app.engines.real_options import RealOptionsInput, simulate_real_options_value
+from app.engines.risk_attribution import compute_shapley_attribution
 from app.engines.value_of_information import run_value_of_information_analysis
 from app.models.schemas import (
     AuditRequest,
@@ -81,8 +83,11 @@ from app.models.schemas import (
     MultiStateResult,
     ProvenanceBundle,
     ProvenanceItem,
+    RealOptionsResult,
+    RiskAttributionResult,
     ScenarioResult,
     SensitivityPoint,
+    ShapleyComponentSchema,
     SignalEVSISchema,
     SimulationConfig,
     SuccessProbabilityInput,
@@ -1122,7 +1127,56 @@ def run_full_audit(
         methodology_note=voi_raw.methodology_note,
     )
 
-    # ---- Step 14: Report ----
+    # ---- Step 14: Real-options valuation ----
+    ro_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xDEADBEEF)
+    ro_input = RealOptionsInput(
+        asset_value_success=float(valuation.asset_value_success),
+        exercise_cost=0.0,
+        asset_volatility=0.60,
+        annual_discount_rate=float(valuation.annual_discount_rate),
+        pos_mean=float(pos_result.posterior_mean),
+    )
+    ro_raw = simulate_real_options_value(t_sci, pos_samples, ro_input, ro_rng)
+    real_options_result = RealOptionsResult(
+        rov_mean=ro_raw.rov_mean,
+        rov_median=ro_raw.rov_median,
+        rov_p5=ro_raw.rov_p5,
+        rov_p95=ro_raw.rov_p95,
+        rnpv_static=ro_raw.rnpv_static,
+        real_options_premium=ro_raw.real_options_premium,
+        real_options_premium_pct=ro_raw.real_options_premium_pct,
+        abandonment_value=ro_raw.abandonment_value,
+        model_assumptions=ro_raw.model_assumptions,
+    )
+
+    # ---- Step 15: Shapley risk attribution ----
+    shapley_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xCAFE0001)
+    shapley_raw = compute_shapley_attribution(
+        sensitivity_rows=sensitivity,
+        total_cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        total_ev=val_result.financing_adjusted_rnpv,
+        n_permutations=64,
+        rng=shapley_rng,
+    )
+    risk_attribution_result = RiskAttributionResult(
+        components=[
+            ShapleyComponentSchema(
+                driver=c.driver,
+                description=c.description,
+                cashout_prob_shapley=c.cashout_prob_shapley,
+                ev_shapley=c.ev_shapley,
+                rank=c.rank,
+            )
+            for c in shapley_raw.components
+        ],
+        total_cashout_prob=shapley_raw.total_cashout_prob,
+        total_ev=shapley_raw.total_ev,
+        explained_cashout_prob=shapley_raw.explained_cashout_prob,
+        explained_ev=shapley_raw.explained_ev,
+        methodology_note=shapley_raw.methodology_note,
+    )
+
+    # ---- Step 16: Report ----
     audit_response = AuditResponse(
         company_name=financial.company_name,
         ticker=financial.ticker,
@@ -1143,6 +1197,8 @@ def run_full_audit(
         final_summary=final_summary,
         multi_state=multi_state_result,
         value_of_information=voi_result,
+        real_options=real_options_result,
+        risk_attribution=risk_attribution_result,
         warnings=[
             "This is NOT investment advice.",
             "All model outputs are probabilistic ESTIMATES, not predictions.",
