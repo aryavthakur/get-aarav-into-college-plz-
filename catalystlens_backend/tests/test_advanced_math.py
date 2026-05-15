@@ -214,3 +214,280 @@ class TestAdvancedMathIntegration:
         r = run_full_audit(self._request())
         total = sum(mw.posterior_weight for mw in r.bma.model_weights)
         assert abs(total - 1.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# EVPI explicit decision model
+# ---------------------------------------------------------------------------
+
+class TestEVPIExplicitDecision:
+    def test_evpi_positive_at_borderline_decision(self):
+        """EVPI is positive when PoS is near the break-even point for investment."""
+        # upside_value = 100, capital_required = 40, alpha=beta=1 (PoS=0.5)
+        # invest_value = 0.5*100 - 40 = 10 > 0, so we invest under current belief.
+        # ev_perfect = 0.5 * max(100-40, 0) = 0.5*60 = 30
+        # EVPI = 30 - 10 = 20 > 0
+        evpi = compute_evpi(
+            alpha_posterior=1.0,
+            beta_posterior=1.0,
+            upside_value=100.0,
+            capital_required=40.0,
+        )
+        assert evpi > 0.0
+
+    def test_evpi_zero_when_investment_clearly_dominant(self):
+        """When investment value is far above zero, EVPI approaches zero."""
+        # PoS=1.0 equivalent: alpha >> beta → pos_mean ~ 1
+        # ev_perfect = 1 * max(V-K, 0) = V-K = invest_value → EVPI ~ 0
+        evpi = compute_evpi(
+            alpha_posterior=1000.0,
+            beta_posterior=1.0,
+            upside_value=100.0,
+            capital_required=10.0,
+        )
+        # With nearly certain success, EVPI is near zero
+        assert evpi >= 0.0
+        assert evpi < 5.0  # should be very small
+
+    def test_evpi_zero_when_pass_dominates(self):
+        """When investment is clearly negative (pass dominates), EVPI = 0."""
+        # upside_value=10, capital=100 → invest_value = 0.5*10 - 100 = -95 < 0
+        # decision_value = 0 (pass)
+        # ev_perfect = pos_mean * max(10-100, 0) = 0
+        # EVPI = 0 - 0 = 0
+        evpi = compute_evpi(
+            alpha_posterior=1.0,
+            beta_posterior=1.0,
+            upside_value=10.0,
+            capital_required=100.0,
+        )
+        assert evpi == 0.0
+
+    def test_evpi_nonnegative(self):
+        """EVPI is always non-negative by definition."""
+        for alpha, beta, upside, capital in [
+            (2.0, 3.0, 50.0, 20.0),
+            (5.0, 5.0, 80.0, 45.0),
+            (1.0, 9.0, 100.0, 8.0),
+        ]:
+            evpi = compute_evpi(alpha, beta, upside, capital)
+            assert evpi >= 0.0, f"EVPI={evpi} for alpha={alpha}, beta={beta}"
+
+
+# ---------------------------------------------------------------------------
+# Abandonment value test
+# ---------------------------------------------------------------------------
+
+class TestAbandonmentValue:
+    def test_abandonment_value_positive_with_exercise_cost(self):
+        """When K > 0, some GBM paths have V_T < K, creating abandonment value."""
+        rng = np.random.default_rng(42)
+        n = 5000
+        t_sci = np.full(n, 24.0)  # 24-month milestone
+        pos_samples = np.full(n, 0.5)
+        inputs = RealOptionsInput(
+            asset_value_success=100.0,
+            exercise_cost=80.0,  # high K so many paths have V_T < K
+            asset_volatility=0.60,
+            annual_discount_rate=0.12,
+        )
+        result = simulate_real_options_value(t_sci, pos_samples, inputs, rng)
+        assert result.abandonment_value > 0.0, (
+            f"abandonment_value should be positive when K>0, got {result.abandonment_value}"
+        )
+
+    def test_abandonment_value_zero_when_no_exercise_cost(self):
+        """When K=0, there's no exercise cost, so abandonment value is 0."""
+        rng = np.random.default_rng(42)
+        n = 2000
+        t_sci = np.full(n, 18.0)
+        pos_samples = np.full(n, 0.4)
+        inputs = RealOptionsInput(
+            asset_value_success=200.0,
+            exercise_cost=0.0,  # K=0: no forced investment
+            asset_volatility=0.60,
+            annual_discount_rate=0.12,
+        )
+        result = simulate_real_options_value(t_sci, pos_samples, inputs, rng)
+        # With K=0, forced_invest = pos * V_T * discount (always >=0), so max(0, -fi) = 0
+        assert result.abandonment_value == pytest.approx(0.0, abs=1e-6)
+
+    def test_rov_nonnegative(self):
+        """ROV mean should always be >= 0."""
+        rng = np.random.default_rng(0)
+        n = 1000
+        t_sci = rng.gamma(3.0, 6.0, n)
+        pos_samples = rng.beta(2.0, 5.0, n)
+        inputs = RealOptionsInput(asset_value_success=50.0, exercise_cost=30.0)
+        result = simulate_real_options_value(t_sci, pos_samples, inputs, rng)
+        assert result.rov_mean >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Copula baseline test
+# ---------------------------------------------------------------------------
+
+class TestCopulaBaseline:
+    def test_independent_cashout_matches_base_cashout_prob(self):
+        """When base_cashout_prob is provided, independent_cashout_prob should match it (modulo 4dp rounding)."""
+        rng = np.random.default_rng(7)
+        n = 3000
+        t_fin = np.sort(rng.gamma(3.0, 8.0, n))
+        t_sci = np.sort(rng.gamma(4.0, 5.0, n))
+        # Compute base_cashout from original unsorted arrays
+        t_fin_orig = rng.gamma(3.0, 8.0, n)
+        t_sci_orig = rng.gamma(4.0, 5.0, n)
+        base = float(np.mean(t_fin_orig < t_sci_orig))
+
+        result = simulate_with_copula(t_fin, t_sci, np.random.default_rng(0), rho=0.0, base_cashout_prob=base)
+        # CopulaResult rounds to 4dp, so allow for that
+        assert result.independent_cashout_prob == pytest.approx(round(base, 4), abs=1e-9)
+
+    def test_without_base_cashout_uses_sorted_comparison(self):
+        """Without base_cashout_prob, independent baseline is from sorted arrays."""
+        rng = np.random.default_rng(1)
+        n = 2000
+        t_fin = np.sort(rng.gamma(3.0, 8.0, n))
+        t_sci = np.sort(rng.gamma(4.0, 5.0, n))
+        expected_baseline = float(np.mean(t_fin < t_sci))
+
+        result = simulate_with_copula(t_fin, t_sci, np.random.default_rng(0), rho=0.0)
+        assert result.independent_cashout_prob == pytest.approx(expected_baseline, abs=1e-9)
+
+    def test_run_dependence_base_cashout_from_paired_arrays(self):
+        """run_dependence_analysis base_cashout_prob uses original paired arrays."""
+        rng_data = np.random.default_rng(99)
+        n = 2000
+        t_fin = rng_data.gamma(3.0, 8.0, n)
+        t_sci = rng_data.gamma(4.0, 5.0, n)
+        expected_base = float(np.mean(t_fin < t_sci))
+
+        dep_rng = np.random.default_rng(42)
+        result = run_dependence_analysis(t_fin, t_sci, dep_rng)
+        assert result.base_cashout_prob == pytest.approx(expected_base, abs=0.001)
+
+
+# ---------------------------------------------------------------------------
+# Methodology language test
+# ---------------------------------------------------------------------------
+
+class TestMethodologyLanguage:
+    def test_robustness_note_uses_variance_scaled_language(self):
+        """RobustnessResult methodology note should use softened language."""
+        from app.engines.robustness import RobustnessResult
+        r = RobustnessResult(
+            nominal_cashout_prob=0.4, nominal_ev=1e7,
+            worst_case_cashout_prob_e05=0.42, worst_case_cashout_prob_e10=0.44,
+            worst_case_cashout_prob_e20=0.48, worst_case_ev_e05=9.5e6,
+            worst_case_ev_e10=9.0e6, worst_case_ev_e20=8.0e6,
+            best_case_cashout_prob_e10=0.36, best_case_ev_e10=1.1e7,
+            robustness_interpretation="Moderate sensitivity.",
+        )
+        assert "Variance-scaled" in r.methodology_note
+        assert "Wasserstein-ball DRO" not in r.methodology_note
+
+    def test_bma_note_uses_proxy_language(self):
+        """BMAResult methodology note should mention proxy heuristic."""
+        from app.engines.model_averaging import BMAResult
+        r = BMAResult(
+            bma_cashout_prob=0.35, bma_ev=3e7,
+            model_weights=[], effective_n_models=5.0,
+            highest_weight_model_k=1.3, highest_weight_model_lambda=0.035,
+        )
+        assert "proxy" in r.methodology_note.lower()
+        assert "heuristic" in r.methodology_note.lower()
+
+    def test_risk_attribution_note_uses_sensitivity_language(self):
+        """RiskAttributionResult note should use 'sensitivity-based approximation' language."""
+        from app.engines.risk_attribution import compute_shapley_attribution
+        # We need a mock sensitivity row object
+        class MockRow:
+            variable = "monthly_burn"
+            high_cashout_prob = 0.5
+            low_cashout_prob = 0.3
+            high_expected_value = 2e7
+            low_expected_value = 1e7
+
+        result = compute_shapley_attribution(
+            sensitivity_rows=[MockRow()],
+            total_cashout_prob=0.4,
+            total_ev=1.5e7,
+            n_permutations=4,
+        )
+        assert "sensitivity-based approximation" in result.methodology_note
+        assert "true Shapley decomposition" in result.methodology_note
+
+
+# ---------------------------------------------------------------------------
+# Method status field test
+# ---------------------------------------------------------------------------
+
+class TestMethodStatus:
+    def _make_audit_request(self, n: int = 300):
+        from app.models.schemas import (
+            AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
+            DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
+        )
+        return AuditRequest(
+            financial=CompanyFinancialInput(
+                company_name="StatusCo", ticker="STS",
+                cash_on_hand=15_000_000, marketable_securities=0,
+                quarterly_operating_cash_burn=3_000_000, market_cap=60_000_000,
+            ),
+            clinical=ClinicalCatalystInput(
+                asset_name="STS-01", indication="Oncology",
+                trial_phase="phase_2", trial_status="recruiting",
+                stated_months_to_catalyst=18,
+                enrollment_target=80, enrollment_completed=20,
+                enrollment_rate_per_month=4, number_of_sites=6,
+            ),
+            success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
+            valuation=ValuationInput(asset_value_success=200_000_000),
+            disclosure=DisclosureInput(
+                company_narrative_distribution={"runway_strength": 0.6, "clinical_timeline_confidence": 0.6, "dilution_risk": 0.4, "trial_maturity": 0.5, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
+                structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
+            ),
+            simulation=SimulationConfig(n_simulations=n, random_seed=7, monthly_horizon=24),
+        )
+
+    def test_value_of_information_has_method_status(self):
+        r = run_full_audit(self._make_audit_request())
+        assert r.value_of_information is not None
+        assert hasattr(r.value_of_information, "method_status")
+        assert r.value_of_information.method_status == "heuristic"
+
+    def test_real_options_has_method_status(self):
+        r = run_full_audit(self._make_audit_request())
+        assert r.real_options is not None
+        assert hasattr(r.real_options, "method_status")
+        assert r.real_options.method_status == "heuristic"
+
+    def test_robustness_has_method_status(self):
+        r = run_full_audit(self._make_audit_request())
+        assert r.robustness is not None
+        assert hasattr(r.robustness, "method_status")
+        assert r.robustness.method_status == "heuristic"
+
+    def test_bma_has_method_status(self):
+        r = run_full_audit(self._make_audit_request())
+        assert r.bma is not None
+        assert hasattr(r.bma, "method_status")
+        assert r.bma.method_status == "heuristic"
+
+    def test_dependence_has_method_status(self):
+        r = run_full_audit(self._make_audit_request())
+        assert r.dependence is not None
+        assert hasattr(r.dependence, "method_status")
+        assert r.dependence.method_status == "heuristic"
+
+    def test_risk_attribution_has_method_status(self):
+        r = run_full_audit(self._make_audit_request())
+        assert r.risk_attribution is not None
+        assert hasattr(r.risk_attribution, "method_status")
+        assert r.risk_attribution.method_status == "heuristic"
+
+    def test_state_space_has_method_status(self):
+        r = run_full_audit(self._make_audit_request())
+        assert r.state_space is not None
+        assert hasattr(r.state_space, "method_status")
+        assert r.state_space.method_status == "experimental_scaffold"
