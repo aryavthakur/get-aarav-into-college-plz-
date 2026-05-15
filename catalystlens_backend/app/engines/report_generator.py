@@ -318,6 +318,9 @@ due to enrollment shortfalls, endpoint revisions, or regulatory feedback.
 | Modelled Delay Factor | {mt.delay_factor:.2f}x stated timeline |
 | Adjusted Mean Timeline | {_fmt_months(mt.adjusted_mean_months)} |
 | Enrollment Remaining | {_fmt_months(mt.enrollment_remaining_months)} |
+| Primary Completion Estimate | {_fmt_months(mt.primary_completion_months)} |
+| Public Readout Lag | {_fmt_months(mt.public_readout_lag_months)} |
+| Public Readout Estimate | {_fmt_months(mt.public_readout_months)} |
 | Gamma α (shape) | {mt.gamma_alpha:.3f} |
 | Gamma β (rate) | {mt.gamma_beta_rate:.5f} |
 | **P5 (Fast Case)** | **{_fmt_months(mt.p5_months)}** |
@@ -330,7 +333,9 @@ due to enrollment shortfalls, endpoint revisions, or regulatory feedback.
 > approximately {mt.enrollment_remaining_months:.0f} months of enrollment remaining
 > at the current accrual rate of {clin.enrollment_rate_per_month:.1f} patients/month.
 > The minimum possible catalyst time cannot be shorter than this enrollment
-> completion timeline plus post-completion follow-up."""
+> completion timeline plus post-completion follow-up. Public readout is modeled
+> separately from primary completion, adding data cleaning, analysis, and
+> disclosure lag assumptions."""
 
 
 def _bayesian_pos_section(r: AuditResponse, req: AuditRequest) -> str:

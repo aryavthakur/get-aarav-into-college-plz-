@@ -21,6 +21,9 @@ CatalystType = Literal[
     "phase_completion", "interim_analysis", "primary_readout",
     "regulatory_submission", "approval_decision", "proof_of_concept",
 ]
+FinancingEventKind = Literal["clean_refi", "distressed_refi", "partnership"]
+CashPathState = Literal["continue", "cash_exhaustion", "horizon_reached"]
+SourceType = Literal["sec_filing", "clinicaltrials", "deck", "press_release", "manual_input"]
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +87,22 @@ class ClinicalCatalystInput(BaseModel):
         0.5, ge=0.0, le=1.0, description="0=standard pathway, 1=novel/complex regulatory path"
     )
     catalyst_type: CatalystType = "primary_readout"
+    followup_months_after_enrollment: float = Field(
+        1.0, ge=0.0,
+        description="Endpoint follow-up duration after enrollment completion before primary completion",
+    )
+    data_cleaning_months: float = Field(
+        1.0, ge=0.0,
+        description="Expected database lock / data cleaning duration after primary completion",
+    )
+    analysis_months: float = Field(
+        1.0, ge=0.0,
+        description="Expected statistical analysis duration after data cleaning",
+    )
+    disclosure_lag_months: float = Field(
+        1.0, ge=0.0,
+        description="Expected lag from analysis completion to public readout disclosure",
+    )
 
     @field_validator("enrollment_completed")
     @classmethod
@@ -96,6 +115,18 @@ class ClinicalCatalystInput(BaseModel):
 
 class SuccessProbabilityInput(BaseModel):
     trial_phase: TrialPhase
+    disease_area: Optional[str] = Field(
+        None,
+        description="Disease area stratum for future hierarchical PoS priors",
+    )
+    modality: Optional[str] = Field(
+        None,
+        description="Therapeutic modality stratum for future hierarchical PoS priors",
+    )
+    endpoint_family: Optional[str] = Field(
+        None,
+        description="Endpoint family stratum for future hierarchical PoS priors",
+    )
     positive_signals: List[str] = Field(
         default_factory=list,
         description="List of positive signal keys present for this trial",
@@ -190,6 +221,68 @@ class AuditRequest(BaseModel):
         return self
 
 
+class EvidenceRef(BaseModel):
+    source_type: SourceType = "manual_input"
+    source_id: str = "manual"
+    as_of_date: Optional[str] = None
+    locator: Optional[str] = None
+    sha256: Optional[str] = None
+
+
+class ProvenanceItem(BaseModel):
+    field: str
+    value: Optional[float | str | int | bool] = None
+    evidence: EvidenceRef = Field(default_factory=EvidenceRef)
+
+
+class ProvenanceBundle(BaseModel):
+    financial_inputs: List[ProvenanceItem] = Field(default_factory=list)
+    clinical_inputs: List[ProvenanceItem] = Field(default_factory=list)
+    claims: List[ProvenanceItem] = Field(default_factory=list)
+    provenance_status: Literal["manual_inputs_unverified", "source_traced"] = "manual_inputs_unverified"
+
+
+class FinancingEventInput(BaseModel):
+    month: int = Field(..., ge=0)
+    kind: FinancingEventKind
+    gross_proceeds: float = Field(..., ge=0)
+    transaction_cost_rate: float = Field(0.0, ge=0.0, le=0.95)
+
+    @property
+    def net_proceeds(self) -> float:
+        return self.gross_proceeds * (1.0 - self.transaction_cost_rate)
+
+
+class CashPathInput(BaseModel):
+    starting_cash: float = Field(..., ge=0)
+    monthly_burn: float = Field(..., gt=0)
+    horizon_months: int = Field(48, ge=1, le=240)
+    monthly_burn_volatility: float = Field(
+        0.0, ge=0.0, le=2.0,
+        description="Lognormal monthly burn volatility; 0 keeps burn deterministic.",
+    )
+    financing_events: List[FinancingEventInput] = Field(default_factory=list)
+
+
+class CashPathMonth(BaseModel):
+    month: int
+    starting_cash: float
+    sampled_burn: float
+    capital_inflow: float
+    ending_cash: float
+    state: CashPathState
+
+
+class CashPathResult(BaseModel):
+    cash_exhaustion_month: Optional[int]
+    final_state: CashPathState
+    minimum_cash_balance: float
+    ending_cash: float
+    total_burn: float
+    total_capital_raised: float
+    monthly_balances: List[CashPathMonth]
+
+
 # ---------------------------------------------------------------------------
 # RESULT SCHEMAS
 # ---------------------------------------------------------------------------
@@ -240,6 +333,14 @@ class MilestoneTimingResult(BaseModel):
     cv: float
     enrollment_fraction: float
     enrollment_remaining_months: float
+    enrollment_component_months: float = 0.0
+    followup_component_months: float = 0.0
+    data_cleaning_component_months: float = 0.0
+    analysis_component_months: float = 0.0
+    disclosure_lag_months: float = 0.0
+    primary_completion_months: float = 0.0
+    public_readout_lag_months: float = 0.0
+    public_readout_months: float = 0.0
     p5_months: float
     p25_months: float
     p50_months: float
@@ -357,12 +458,27 @@ class DataQualityResult(BaseModel):
     data_quality_score: Literal["high", "moderate", "low"]
 
 
+class ValidationSnapshot(BaseModel):
+    solvency_calibration_status: Literal["research_mode", "validated"] = "research_mode"
+    solvency_c_index_ipcw: Optional[float] = None
+    solvency_integrated_brier_score: Optional[float] = None
+    solvency_ici_12m: Optional[float] = None
+    pos_ppc_status: Literal["not_available", "pass", "fail"] = "not_available"
+    timing_interval_coverage_status: Literal["not_available", "pass", "fail"] = "not_available"
+    notes: List[str] = Field(default_factory=list)
+
+
 class ModelVersionInfo(BaseModel):
     backend_version: str = "0.1.0"
+    name: str = "catalystlens-backend"
+    semver: str = "0.1.0"
+    artifact_id: str = "mvp_assumption_engine"
     coefficient_set: str = "mvp_untrained_v1"
     n_simulations: int
     random_seed: int
     config_hash: str
+    training_cutoff_date: Optional[str] = None
+    data_snapshot_ids: List[str] = Field(default_factory=list)
     calibration_status: str = (
         "UNCALIBRATED — coefficients are configurable MVP assumptions, "
         "not fit to historical biotech financing outcome data"
@@ -375,7 +491,10 @@ class AuditResponse(BaseModel):
     asset_name: str
     audit_timestamp: str
     model_version: ModelVersionInfo
+    provenance: ProvenanceBundle = Field(default_factory=ProvenanceBundle)
+    validation_snapshot: ValidationSnapshot = Field(default_factory=ValidationSnapshot)
     data_quality: DataQualityResult
+    cash_path: CashPathResult
     solvency: SolvencyResult
     success_probability: SuccessProbabilityResult
     milestone_timing: MilestoneTimingResult

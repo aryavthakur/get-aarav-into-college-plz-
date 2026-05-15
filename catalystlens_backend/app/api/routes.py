@@ -41,6 +41,9 @@ def root():
             "Probabilistic biotech capital-to-catalyst audit engine. "
             "All outputs are model estimates, not investment advice."
         ),
+        "model_mode": "research_mode",
+        "official_data_clients": ["sec_edgar", "clinicaltrials_gov", "fred"],
+        "artifact_serving": "manual_assumption_engine_until_trained_artifacts_exist",
     }
 
 

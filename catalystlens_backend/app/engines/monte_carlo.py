@@ -39,6 +39,7 @@ from app.engines.bayesian_success import (
 )
 from app.engines.burn_regime import run_burn_regime_analysis
 from app.engines.capital_to_catalyst import run_capital_to_catalyst_analysis
+from app.engines.cash_path import simulate_cash_path
 from app.engines.disclosure_consistency import run_disclosure_consistency_analysis
 from app.engines.milestone_timing import (
     estimate_gamma_parameters,
@@ -59,16 +60,20 @@ from app.engines.valuation import run_valuation_simulation
 from app.models.schemas import (
     AuditRequest,
     AuditResponse,
+    CashPathInput,
     ClinicalCatalystInput,
     CompanyFinancialInput,
     DataQualityResult,
     FinalSummaryResult,
     ModelVersionInfo,
+    ProvenanceBundle,
+    ProvenanceItem,
     ScenarioResult,
     SensitivityPoint,
     SimulationConfig,
     SuccessProbabilityInput,
     ValuationInput,
+    ValidationSnapshot,
 )
 
 
@@ -128,6 +133,32 @@ _SCENARIOS: List[Dict[str, Any]] = [
         "financing_need": "Likely",
     },
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class RNGStreams:
+    """Independent, reproducible random streams for simulation components."""
+    cash: np.random.Generator
+    financing: np.random.Generator
+    science: np.random.Generator
+    valuation: np.random.Generator
+
+
+def spawn_streams(seed: int) -> RNGStreams:
+    """
+    Spawn deterministic non-overlapping streams from one seed.
+
+    SeedSequence gives exact reproducibility while avoiding accidental coupling
+    between cash paths, financing hazards, science timing, and valuation draws.
+    """
+    seed_sequence = np.random.SeedSequence(seed)
+    cash, financing, science, valuation = seed_sequence.spawn(4)
+    return RNGStreams(
+        cash=np.random.default_rng(cash),
+        financing=np.random.default_rng(financing),
+        science=np.random.default_rng(science),
+        valuation=np.random.default_rng(valuation),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -708,10 +739,56 @@ def _build_model_version(config: CatalystLensConfig, sim_cfg: SimulationConfig) 
     config_hash = hashlib.sha256(config_repr.encode()).hexdigest()[:12]
     return ModelVersionInfo(
         backend_version="0.1.0",
+        name="catalystlens-backend",
+        semver="0.1.0",
+        artifact_id="mvp_assumption_engine",
         coefficient_set="mvp_untrained_v1",
         n_simulations=sim_cfg.n_simulations,
         random_seed=sim_cfg.random_seed,
         config_hash=config_hash,
+        training_cutoff_date=None,
+        data_snapshot_ids=[],
+    )
+
+
+def _build_manual_provenance(request: AuditRequest) -> ProvenanceBundle:
+    """Build explicit manual-input provenance placeholders until source ETL exists."""
+    financial_items = [
+        ProvenanceItem(field="cash_on_hand", value=request.financial.cash_on_hand),
+        ProvenanceItem(field="marketable_securities", value=request.financial.marketable_securities),
+        ProvenanceItem(
+            field="quarterly_operating_cash_burn",
+            value=request.financial.quarterly_operating_cash_burn,
+        ),
+        ProvenanceItem(field="market_cap", value=request.financial.market_cap),
+    ]
+    clinical_items = [
+        ProvenanceItem(field="trial_phase", value=request.clinical.trial_phase),
+        ProvenanceItem(field="trial_status", value=request.clinical.trial_status),
+        ProvenanceItem(
+            field="stated_months_to_catalyst",
+            value=request.clinical.stated_months_to_catalyst,
+        ),
+        ProvenanceItem(field="enrollment_target", value=request.clinical.enrollment_target),
+        ProvenanceItem(field="enrollment_completed", value=request.clinical.enrollment_completed),
+    ]
+    return ProvenanceBundle(
+        financial_inputs=financial_items,
+        clinical_inputs=clinical_items,
+        claims=[],
+        provenance_status="manual_inputs_unverified",
+    )
+
+
+def _build_validation_snapshot() -> ValidationSnapshot:
+    return ValidationSnapshot(
+        solvency_calibration_status="research_mode",
+        pos_ppc_status="not_available",
+        timing_interval_coverage_status="not_available",
+        notes=[
+            "No historical labeled training dataset supplied; calibration metrics are unavailable.",
+            "Outputs remain assumption-based research-mode estimates, not validated predictions.",
+        ],
     )
 
 
@@ -758,7 +835,8 @@ def run_full_audit(
 
     sim_cfg: SimulationConfig = request.simulation
     n = sim_cfg.n_simulations
-    rng = np.random.default_rng(sim_cfg.random_seed)
+    streams = spawn_streams(sim_cfg.random_seed)
+    rng = streams.science
 
     # Override Weibull params from simulation config (safe: working on a copy)
     config.weibull_params.lambda_ = sim_cfg.baseline_lambda
@@ -782,6 +860,16 @@ def run_full_audit(
         monthly_horizon=sim_cfg.monthly_horizon,
     )
 
+    # ---- Step 2b: Mechanical cash path ----
+    cash_path_result = simulate_cash_path(
+        CashPathInput(
+            starting_cash=compute_total_liquidity(financial),
+            monthly_burn=calculate_monthly_burn(financial.quarterly_operating_cash_burn),
+            horizon_months=sim_cfg.monthly_horizon,
+        ),
+        rng=streams.cash,
+    )
+
     # ---- Step 3: Milestone timing ----
     milestone_result = run_milestone_timing_analysis(clinical, config)
 
@@ -794,15 +882,17 @@ def run_full_audit(
     # ---- Step 6: Monte Carlo core simulation ----
     t_fin, t_sci, pos_samples = _run_core_simulation(
         financial, clinical, pos_input, valuation,
-        burn_result.burn_acceleration, n, rng, config,
+        burn_result.burn_acceleration, n, streams.financing, config,
     )
+    if cash_path_result.cash_exhaustion_month is not None:
+        t_fin = np.minimum(t_fin, float(cash_path_result.cash_exhaustion_month))
 
     # ---- Step 7: Capital-to-catalyst ----
     ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
 
     # ---- Step 8: Valuation ----
     val_result = run_valuation_simulation(
-        t_sci, t_fin, pos_samples, valuation, rng,
+        t_sci, t_fin, pos_samples, valuation, streams.valuation,
         market_condition_score=float(financial.biotech_market_condition_score),
         config=config,
     )
@@ -879,7 +969,10 @@ def run_full_audit(
         asset_name=clinical.asset_name,
         audit_timestamp=datetime.now(timezone.utc).isoformat(),
         model_version=_build_model_version(config, sim_cfg),
+        provenance=_build_manual_provenance(request),
+        validation_snapshot=_build_validation_snapshot(),
         data_quality=_compute_data_quality(request),
+        cash_path=cash_path_result,
         solvency=solvency_result,
         success_probability=pos_result,
         milestone_timing=milestone_result,

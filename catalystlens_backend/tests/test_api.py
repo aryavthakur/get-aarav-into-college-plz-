@@ -73,6 +73,12 @@ class TestRootEndpoint:
         response = client.get("/")
         assert "version" in response.json()
 
+    def test_response_exposes_research_mode_status(self):
+        response = client.get("/")
+        data = response.json()
+        assert data["model_mode"] == "research_mode"
+        assert data["official_data_clients"] == ["sec_edgar", "clinicaltrials_gov", "fred"]
+
 
 class TestAuditEndpoint:
     def test_audit_returns_200_with_example_payload(self):
@@ -86,7 +92,7 @@ class TestAuditEndpoint:
         data = response.json()
         expected_keys = [
             "company_name", "ticker", "asset_name",
-            "model_version", "data_quality",
+            "model_version", "provenance", "validation_snapshot", "data_quality", "cash_path",
             "solvency", "success_probability", "milestone_timing",
             "capital_to_catalyst", "valuation", "burn_regime",
             "disclosure_consistency", "final_summary",

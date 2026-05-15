@@ -18,10 +18,20 @@ catalystlens_backend/
 │   │   └── routes.py                # All API endpoints
 │   ├── core/
 │   │   └── config.py                # All coefficients and thresholds
+│   ├── data_sources/
+│   │   ├── sec_client.py            # SEC EDGAR submissions/companyfacts client
+│   │   ├── clinicaltrials_client.py # ClinicalTrials.gov API v2 client
+│   │   ├── fred_client.py           # FRED market-covariate client
+│   │   └── cache.py                 # Raw JSON payload cache with SHA-256 hashes
+│   ├── labeling/
+│   │   └── financing_events.py      # First-pass financing/discontinuation labels
 │   ├── models/
 │   │   └── schemas.py               # Pydantic input/output schemas
+│   ├── registry/
+│   │   └── model_registry.py        # Frozen model artifact metadata cards
 │   └── engines/
 │       ├── solvency.py              # Financial clock (Cox-Weibull survival)
+│       ├── cash_path.py             # Mechanical monthly cash-balance path
 │       ├── milestone_timing.py      # Scientific clock (Gamma distribution)
 │       ├── bayesian_success.py      # Bayesian PoS (Beta posterior)
 │       ├── capital_to_catalyst.py   # Gap probability P(T_sci < T_fin)
@@ -37,6 +47,9 @@ catalystlens_backend/
 │   ├── test_bayesian_success.py
 │   ├── test_monte_carlo.py
 │   └── test_api.py
+├── training/
+│   └── datasets/
+│       └── build_company_panel.py   # Point-in-time company-quarter panel builder
 ├── conftest.py
 └── requirements.txt
 ```
@@ -72,7 +85,7 @@ API docs available at:
 pytest tests/ -v
 ```
 
-Expected output: 107 tests, all passing.
+Expected output: 127 tests, all passing.
 
 ---
 
@@ -128,6 +141,7 @@ The example company (NovaCure Therapeutics / NCTX) is designed to produce **mode
 | File | Mathematical Content |
 |---|---|
 | `engines/solvency.py` | Cox PH-style Weibull survival model, risk multiplier computation, inverse-CDF sampling |
+| `engines/cash_path.py` | Mechanical cash balance path: cash[t+1] = cash[t] - burn[t] + financing inflows |
 | `engines/milestone_timing.py` | Gamma(α, β) parameterization from stated timeline + complexity, delay factor calculation |
 | `engines/bayesian_success.py` | Beta(α, β) prior/posterior, signal weight updates, credible intervals |
 | `engines/capital_to_catalyst.py` | P(T_sci < T_fin) from Monte Carlo samples, gap statistics |
@@ -136,6 +150,27 @@ The example company (NovaCure Therapeutics / NCTX) is designed to produce **mode
 | `engines/disclosure_consistency.py` | Jensen-Shannon divergence, KL divergence, normalized distributions |
 | `engines/monte_carlo.py` | Vectorized simulation loop, scenario engine, sensitivity engine |
 | `core/config.py` | All configurable coefficients (Cox betas, Weibull params, phase priors, signal weights) |
+
+---
+
+## Institutional Data and Training Foundation
+
+The backend now includes the foundation required to move from assumption-based MVP
+outputs to trained artifacts:
+
+| Layer | Files | Purpose |
+|---|---|---|
+| Official data clients | `app/data_sources/sec_client.py`, `clinicaltrials_client.py`, `fred_client.py` | Fetch SEC EDGAR, ClinicalTrials.gov v2, and FRED JSON payloads through explicit URL builders |
+| Raw cache | `app/data_sources/cache.py` | Persist raw source payloads with SHA-256 hashes for replay and provenance |
+| Provenance | `app/provenance.py`, `app/models/schemas.py` | Attach source type, source id, locator, date, and payload hash to inputs and claims |
+| Point-in-time panel | `training/datasets/build_company_panel.py` | Convert SEC/ClinicalTrials/FRED payloads into company-quarter feature rows |
+| Outcome labels | `app/labeling/financing_events.py` | First-pass labels for refinancing, distressed financing, partnership, and discontinuation events |
+| Model registry | `app/registry/model_registry.py` | Store frozen artifact cards with training cutoff, snapshot IDs, metrics, and config hash |
+
+Current `/audit` responses expose `provenance`, `validation_snapshot`, and
+`model_version` fields. Until historical labels are assembled and trained
+artifacts are registered, the service reports `research_mode` and uses the
+manual assumption engine rather than claiming calibrated institutional accuracy.
 
 ---
 
