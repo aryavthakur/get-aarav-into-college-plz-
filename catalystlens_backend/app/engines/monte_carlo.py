@@ -22,8 +22,9 @@ Integrates all CatalystLens sub-engines into a single coherent simulation:
 from __future__ import annotations
 
 import copy
+import hashlib
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -58,7 +59,9 @@ from app.models.schemas import (
     AuditResponse,
     ClinicalCatalystInput,
     CompanyFinancialInput,
+    DataQualityResult,
     FinalSummaryResult,
+    ModelVersionInfo,
     ScenarioResult,
     SensitivityPoint,
     SimulationConfig,
@@ -204,9 +207,15 @@ def _run_core_simulation(
     n: int,
     rng: np.random.Generator,
     config: CatalystLensConfig,
+    pos_alpha_override: Optional[float] = None,
+    pos_beta_override: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Run vectorised simulation core.
+
+    pos_alpha_override / pos_beta_override allow the sensitivity engine to inject
+    modified Beta parameters without re-running the full signal update pipeline,
+    ensuring that PoS sensitivity actually changes the sampled success probabilities.
 
     Returns: (t_fin_samples, t_sci_samples, pos_samples)
     """
@@ -231,14 +240,17 @@ def _run_core_simulation(
     )
     rm = calculate_risk_multiplier(lp)
 
-    alpha_pr, beta_pr = build_success_prior_by_phase(
-        pos_input.trial_phase, config,
-        pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
-    )
-    alpha_post, beta_post, _, _ = update_beta_posterior(
-        alpha_pr, beta_pr,
-        pos_input.positive_signals, pos_input.negative_signals, config,
-    )
+    if pos_alpha_override is not None and pos_beta_override is not None:
+        alpha_post, beta_post = pos_alpha_override, pos_beta_override
+    else:
+        alpha_pr, beta_pr = build_success_prior_by_phase(
+            pos_input.trial_phase, config,
+            pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
+        )
+        alpha_post, beta_post, _, _ = update_beta_posterior(
+            alpha_pr, beta_pr,
+            pos_input.positive_signals, pos_input.negative_signals, config,
+        )
 
     gamma_alpha, gamma_beta_rate, _, _ = estimate_gamma_parameters(clinical, config)
 
@@ -324,7 +336,10 @@ def _run_scenario(
     # Override pos_samples with scenario-adjusted mean (rescale beta)
     pos_samples = np.clip(pos_samples * (new_pos_mean / max(base_pos_mean, 0.01)), 0.01, 0.99)
 
-    val_result = run_valuation_simulation(t_sci, t_fin, pos_samples, val_mod, rng)
+    val_result = run_valuation_simulation(
+        t_sci, t_fin, pos_samples, val_mod, rng,
+        market_condition_score=float(fin_mod.biotech_market_condition_score),
+    )
     ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
 
     return ScenarioResult(
@@ -363,7 +378,10 @@ def _run_sensitivity(
             fin, clin, pos_input, val, ba, n, rng, config
         )
         ctc = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
-        val_r = run_valuation_simulation(t_sci, t_fin, pos, val, rng)
+        val_r = run_valuation_simulation(
+            t_sci, t_fin, pos, val, rng,
+            market_condition_score=float(fin.biotech_market_condition_score),
+        )
         return ctc.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv
 
     field = variable_def["field"]
@@ -415,13 +433,26 @@ def _run_sensitivity(
                 a_pr, b_pr, pos_input.positive_signals, pos_input.negative_signals, config
             )
             base_pos = a_po / (a_po + b_po)
+            total_concentration = a_po + b_po
             mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
             if level == "base":
                 mult = 1.0
-            lbl = f"{base_pos * mult:.0%} PoS"
-            # PoS sensitivity handled via pos_samples scaling in _sim below — approximate
-            # We run base sim but report hypothetical label only
-            results.append((base_cashout_prob, base_ev))
+            new_pos_mean = float(np.clip(base_pos * mult, 0.01, 0.99))
+            # Derive shifted alpha/beta preserving total concentration (same certainty, shifted mean)
+            new_alpha = new_pos_mean * total_concentration
+            new_beta = (1.0 - new_pos_mean) * total_concentration
+            lbl = f"{new_pos_mean:.0%} PoS"
+            # Run real simulation with overridden PoS parameters
+            t_f, t_s, pos_s = _run_core_simulation(
+                fin_mod, clin_mod, pos_input, val_mod, ba_mod, n,
+                rng, config, pos_alpha_override=new_alpha, pos_beta_override=new_beta,
+            )
+            ctc_r = run_capital_to_catalyst_analysis(t_s, t_f, config)
+            val_r = run_valuation_simulation(
+                t_s, t_f, pos_s, val_mod, rng,
+                market_condition_score=float(fin_mod.biotech_market_condition_score),
+            )
+            results.append((ctc_r.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv))
             if level == "low":
                 low_label = lbl
             elif level == "base":
@@ -577,6 +608,90 @@ def _generate_diligence_questions(
 
 
 # ---------------------------------------------------------------------------
+# Data quality scoring
+# ---------------------------------------------------------------------------
+
+_EXPECTED_DISCLOSURE_CATEGORIES = {
+    "runway_strength", "clinical_timeline_confidence", "dilution_risk",
+    "trial_maturity", "endpoint_strength", "pipeline_diversification",
+}
+
+
+def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
+    limitations: List[str] = []
+
+    # Financial completeness
+    fin_score = 1.0
+    if not request.financial.quarterly_burn_history:
+        fin_score -= 0.25
+        limitations.append("No quarterly burn history supplied; burn regime detection is limited.")
+    if request.financial.going_concern_flag is False and request.financial.months_since_last_raise == 12.0:
+        fin_score -= 0.05
+        limitations.append("months_since_last_raise at default (12); verify against actual raise date.")
+    if request.financial.cash_on_hand + request.financial.marketable_securities == 0:
+        fin_score -= 0.30
+        limitations.append("Total liquidity is zero; model results are not meaningful.")
+    if request.financial.market_cap < (request.financial.cash_on_hand + request.financial.marketable_securities):
+        limitations.append("Market cap is below reported cash — negative enterprise value. Verify inputs.")
+
+    # Clinical completeness
+    clin_score = 1.0
+    enroll_frac = request.clinical.enrollment_completed / request.clinical.enrollment_target
+    if enroll_frac == 0:
+        clin_score -= 0.15
+        limitations.append("Zero enrollment completed; trial may be pre-recruiting or very early stage.")
+    if request.clinical.trial_status in ("suspended", "withdrawn"):
+        clin_score -= 0.30
+        limitations.append(f"Trial status is '{request.clinical.trial_status}'; catalyst timing is highly uncertain.")
+    if request.clinical.enrollment_rate_per_month < 1.0:
+        clin_score -= 0.10
+        limitations.append("Enrollment rate < 1 patient/month; verify against ClinicalTrials.gov accrual data.")
+
+    # Disclosure completeness
+    narrative_cats = set(request.disclosure.company_narrative_distribution.keys())
+    audit_cats = set(request.disclosure.structured_audit_distribution.keys())
+    missing_cats = _EXPECTED_DISCLOSURE_CATEGORIES - (narrative_cats | audit_cats)
+    disc_score = max(0.0, 1.0 - len(missing_cats) / len(_EXPECTED_DISCLOSURE_CATEGORIES) * 0.5)
+    if missing_cats:
+        limitations.append(f"Missing disclosure categories: {', '.join(sorted(missing_cats))}.")
+
+    overall = (fin_score + clin_score + disc_score) / 3.0
+    overall = float(max(0.0, min(1.0, overall)))
+    fin_score = float(max(0.0, min(1.0, fin_score)))
+    clin_score = float(max(0.0, min(1.0, clin_score)))
+    disc_score = float(max(0.0, min(1.0, disc_score)))
+
+    quality_label: str
+    if overall >= 0.80:
+        quality_label = "high"
+    elif overall >= 0.55:
+        quality_label = "moderate"
+    else:
+        quality_label = "low"
+
+    return DataQualityResult(
+        financial_data_completeness=round(fin_score, 2),
+        clinical_data_completeness=round(clin_score, 2),
+        disclosure_data_completeness=round(disc_score, 2),
+        overall_completeness=round(overall, 2),
+        primary_limitations=limitations,
+        data_quality_score=quality_label,
+    )
+
+
+def _build_model_version(config: CatalystLensConfig, sim_cfg: SimulationConfig) -> ModelVersionInfo:
+    config_repr = str(config.cox_coefficients) + str(config.weibull_params) + str(config.phase_priors)
+    config_hash = hashlib.md5(config_repr.encode()).hexdigest()[:8]
+    return ModelVersionInfo(
+        backend_version="0.1.0",
+        coefficient_set="mvp_untrained_v1",
+        n_simulations=sim_cfg.n_simulations,
+        random_seed=sim_cfg.random_seed,
+        config_hash=config_hash,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Risk classification
 # ---------------------------------------------------------------------------
 
@@ -614,14 +729,14 @@ def run_full_audit(
 
     This is the primary API integration point.
     """
-    if config is None:
-        config = get_default_config()
+    # Always deepcopy to avoid mutating the global singleton across requests
+    config = copy.deepcopy(get_default_config() if config is None else config)
 
     sim_cfg: SimulationConfig = request.simulation
     n = sim_cfg.n_simulations
     rng = np.random.default_rng(sim_cfg.random_seed)
 
-    # Override Weibull params from simulation config
+    # Override Weibull params from simulation config (safe: working on a copy)
     config.weibull_params.lambda_ = sim_cfg.baseline_lambda
     config.weibull_params.k = sim_cfg.baseline_k
 
@@ -662,7 +777,10 @@ def run_full_audit(
     ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
 
     # ---- Step 8: Valuation ----
-    val_result = run_valuation_simulation(t_sci, t_fin, pos_samples, valuation, rng)
+    val_result = run_valuation_simulation(
+        t_sci, t_fin, pos_samples, valuation, rng,
+        market_condition_score=float(financial.biotech_market_condition_score),
+    )
 
     # ---- Step 9: Scenario analysis ----
     n_scen = config.scenario_n_simulations
@@ -735,6 +853,8 @@ def run_full_audit(
         ticker=financial.ticker,
         asset_name=clinical.asset_name,
         audit_timestamp=datetime.now(timezone.utc).isoformat(),
+        model_version=_build_model_version(config, sim_cfg),
+        data_quality=_compute_data_quality(request),
         solvency=solvency_result,
         success_probability=pos_result,
         milestone_timing=milestone_result,

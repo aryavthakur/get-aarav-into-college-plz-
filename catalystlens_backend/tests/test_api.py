@@ -86,6 +86,7 @@ class TestAuditEndpoint:
         data = response.json()
         expected_keys = [
             "company_name", "ticker", "asset_name",
+            "model_version", "data_quality",
             "solvency", "success_probability", "milestone_timing",
             "capital_to_catalyst", "valuation", "burn_regime",
             "disclosure_consistency", "final_summary",
@@ -93,6 +94,26 @@ class TestAuditEndpoint:
         ]
         for key in expected_keys:
             assert key in data, f"Missing key: {key}"
+
+    def test_audit_model_version_fields(self):
+        payload = _load_example_payload()
+        response = client.post("/audit", json=payload)
+        mv = response.json()["model_version"]
+        assert mv["backend_version"] == "0.1.0"
+        assert mv["coefficient_set"] == "mvp_untrained_v1"
+        assert isinstance(mv["n_simulations"], int)
+        assert isinstance(mv["config_hash"], str) and len(mv["config_hash"]) > 0
+
+    def test_audit_data_quality_fields(self):
+        payload = _load_example_payload()
+        response = client.post("/audit", json=payload)
+        dq = response.json()["data_quality"]
+        assert 0.0 <= dq["financial_data_completeness"] <= 1.0
+        assert 0.0 <= dq["clinical_data_completeness"] <= 1.0
+        assert 0.0 <= dq["disclosure_data_completeness"] <= 1.0
+        assert 0.0 <= dq["overall_completeness"] <= 1.0
+        assert dq["data_quality_score"] in ("high", "moderate", "low")
+        assert isinstance(dq["primary_limitations"], list)
 
     def test_audit_company_name_matches_input(self):
         payload = _load_example_payload()

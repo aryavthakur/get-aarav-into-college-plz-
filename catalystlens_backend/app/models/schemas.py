@@ -247,6 +247,14 @@ class ValuationResult(BaseModel):
     probability_downside: float
     probability_high_upside: float
     high_upside_threshold: float
+    # Four-state financing model probabilities
+    p_funded_through_catalyst: float = 0.0
+    p_refinancing_success: float = 0.0
+    p_distressed_financing: float = 0.0
+    p_program_discontinuation: float = 0.0
+    mean_value_if_funded: float = 0.0
+    mean_value_if_refinanced: float = 0.0
+    mean_value_if_distressed: float = 0.0
     model_assumptions: List[str]
 
 
@@ -312,11 +320,34 @@ class FinalSummaryResult(BaseModel):
     diligence_questions: List[str]
 
 
+class DataQualityResult(BaseModel):
+    financial_data_completeness: float = Field(ge=0.0, le=1.0)
+    clinical_data_completeness: float = Field(ge=0.0, le=1.0)
+    disclosure_data_completeness: float = Field(ge=0.0, le=1.0)
+    overall_completeness: float = Field(ge=0.0, le=1.0)
+    primary_limitations: List[str]
+    data_quality_score: Literal["high", "moderate", "low"]
+
+
+class ModelVersionInfo(BaseModel):
+    backend_version: str = "0.1.0"
+    coefficient_set: str = "mvp_untrained_v1"
+    n_simulations: int
+    random_seed: int
+    config_hash: str
+    calibration_status: str = (
+        "UNCALIBRATED — coefficients are configurable MVP assumptions, "
+        "not fit to historical biotech financing outcome data"
+    )
+
+
 class AuditResponse(BaseModel):
     company_name: str
     ticker: str
     asset_name: str
     audit_timestamp: str
+    model_version: ModelVersionInfo
+    data_quality: DataQualityResult
     solvency: SolvencyResult
     success_probability: SuccessProbabilityResult
     milestone_timing: MilestoneTimingResult
