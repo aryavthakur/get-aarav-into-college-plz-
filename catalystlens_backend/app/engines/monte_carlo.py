@@ -1109,10 +1109,14 @@ def run_full_audit(
         )
 
     # ---- Step 13: Value of Information ----
+    _pos_mean_voi = max(float(pos_result.posterior_mean), 1e-6)
+    upside_value_voi = val_result.technical_risk_only_rnpv / _pos_mean_voi
+    capital_required_voi = float(cash_path_result.capital_needed_to_reach_catalyst or 0.0)
     voi_raw = run_value_of_information_analysis(
         alpha_posterior=pos_result.alpha_posterior,
         beta_posterior=pos_result.beta_posterior,
-        financing_adjusted_rnpv=val_result.financing_adjusted_rnpv,
+        upside_value=upside_value_voi,
+        capital_required=capital_required_voi,
     )
     voi_result = ValueOfInformationResult(
         evpi_dollars=voi_raw.evpi_dollars,
@@ -1145,7 +1149,16 @@ def run_full_audit(
         annual_discount_rate=float(valuation.annual_discount_rate),
         pos_mean=float(pos_result.posterior_mean),
     )
-    ro_raw = simulate_real_options_value(t_sci, pos_samples, ro_input, ro_rng)
+    ro_raw = simulate_real_options_value(
+        t_sci, pos_samples, ro_input, ro_rng,
+        p_funded=float(val_result.p_funded_through_catalyst),
+        p_clean_refi=float(val_result.p_refinancing_success),
+        p_distressed_refi=float(val_result.p_distressed_financing),
+        p_partnership=0.0,
+        dilution_clean=float(valuation.expected_dilution_if_refinanced),
+        dilution_distressed=min(float(valuation.expected_dilution_if_refinanced) * 2.0, 0.85),
+        retained_partnership=0.65,
+    )
     real_options_result = RealOptionsResult(
         rov_mean=ro_raw.rov_mean,
         rov_median=ro_raw.rov_median,
@@ -1155,6 +1168,7 @@ def run_full_audit(
         real_options_premium=ro_raw.real_options_premium,
         real_options_premium_pct=ro_raw.real_options_premium_pct,
         abandonment_value=ro_raw.abandonment_value,
+        financing_adjusted_rov=ro_raw.financing_adjusted_rov,
         model_assumptions=ro_raw.model_assumptions,
     )
 

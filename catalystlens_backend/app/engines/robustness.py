@@ -55,7 +55,7 @@ class RobustnessResult:
 
     robustness_interpretation: str
     methodology_note: str = (
-        "Wasserstein-ball DRO bounds via Cantelli inequality. "
+        "Variance-scaled distributional sensitivity bounds via Cantelli inequality. "
         "Epsilon = 2-Wasserstein radius as fraction of distributional spread. "
         "Worst-case EV uses variance-scaled bound: E_worst = E_nominal - epsilon * std(V)."
     )

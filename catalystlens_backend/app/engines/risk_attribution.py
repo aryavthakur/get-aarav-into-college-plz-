@@ -181,9 +181,10 @@ def compute_shapley_attribution(
         explained_cashout_prob=round(explained_cp, 4),
         explained_ev=round(explained_ev, 2),
         methodology_note=(
-            "Shapley values computed using Owen random-order estimator "
+            "Shapley-style sensitivity attribution using Owen random-order estimator "
             f"({n_permutations} permutations). Driver contributions are proportional "
-            "to sensitivity analysis ranges — a first-order approximation. "
-            "True Shapley would require re-running the full simulation for each coalition."
+            "to sensitivity analysis ranges — a sensitivity-based approximation, not a "
+            "true Shapley decomposition (which would require re-running the full simulation "
+            "for each coalition subset)."
         ),
     )

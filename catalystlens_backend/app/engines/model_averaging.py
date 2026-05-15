@@ -90,10 +90,11 @@ class BMAResult:
     highest_weight_model_k: float
     highest_weight_model_lambda: float
     methodology_note: str = (
-        "Bayesian Model Averaging over 9 Weibull models "
+        "Proxy Bayesian-style model averaging over hand-specified Weibull candidates "
         "(3 shapes × 3 scales). Posterior weights from proxy log-likelihood "
         "based on calibration at simple runway. BMA output is the "
-        "posterior-weighted average across all model candidates."
+        "posterior-weighted average across all model candidates. "
+        "Note: proxy likelihood uses calibration heuristic, not true marginal likelihood."
     )
 
 

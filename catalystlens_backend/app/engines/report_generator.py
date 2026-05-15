@@ -949,7 +949,9 @@ def _value_of_information_section(r: AuditResponse) -> str:
 
 ### Methodology Note
 
-*{voi.methodology_note}*"""
+*{voi.methodology_note}*
+
+*Method status: {voi.method_status}*"""
 
 
 # ---------------------------------------------------------------------------
@@ -961,18 +963,20 @@ def _robustness_section(r: AuditResponse) -> str:
     if rob is None:
         return ""
 
-    return f"""## Y. Distributional Robustness (Wasserstein DRO)
+    return f"""## Y. Distributional Sensitivity Bounds
 
 {rob.robustness_interpretation}
 
-| Wasserstein Epsilon | Worst-Case Cashout Prob | Worst-Case EV |
+| Perturbation Epsilon | Worst-Case Cashout Prob | Worst-Case EV |
 |---|---:|---:|
 | ε = 0.05 (minor misspecification) | {rob.worst_case_cashout_prob_e05:.1%} | {_fmt_m(rob.worst_case_ev_e05)} |
 | ε = 0.10 (moderate misspecification) | {rob.worst_case_cashout_prob_e10:.1%} | {_fmt_m(rob.worst_case_ev_e10)} |
 | ε = 0.20 (substantial misspecification) | {rob.worst_case_cashout_prob_e20:.1%} | {_fmt_m(rob.worst_case_ev_e20)} |
 | ε = 0.10 best-case | {rob.best_case_cashout_prob_e10:.1%} | {_fmt_m(rob.best_case_ev_e10)} |
 
-*{rob.methodology_note}*"""
+*{rob.methodology_note}*
+
+*Method status: {rob.method_status}*"""
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +1006,9 @@ Effective number of models (posterior entropy): **{bma.effective_n_models:.1f}**
 |---|---|---:|---:|---:|
 {top_rows}
 
-*{bma.methodology_note}*"""
+*{bma.methodology_note}*
+
+*Method status: {bma.method_status}*"""
 
 
 # ---------------------------------------------------------------------------
@@ -1027,7 +1033,9 @@ Base cashout probability (independence): **{dep.base_cashout_prob:.1%}**
 
 **Negative correlation (rho=-0.20):** {dep.negative_rho_interpretation}
 
-*{dep.methodology_note}*"""
+*{dep.methodology_note}*
+
+*Method status: {dep.method_status}*"""
 
 
 # ---------------------------------------------------------------------------
@@ -1063,7 +1071,9 @@ Bootstrap particle filter (1000 particles) over latent company health state.{ano
 
 **Interpretation:** {ss.interpretation}
 
-*{ss.methodology_note}*"""
+*{ss.methodology_note}*
+
+*Method status: {ss.method_status}*"""
 
 
 # ---------------------------------------------------------------------------
@@ -1093,6 +1103,7 @@ value following GBM with sigma={60:.0f}%.
 | Static rNPV (PoS × V × discount) | {_fmt_m(ro.rnpv_static)} |
 | Real-Options Premium | {prem_sign}{_fmt_m(ro.real_options_premium)} ({prem_sign}{ro.real_options_premium_pct:.1f}%) |
 | Abandonment Option Value | {_fmt_m(ro.abandonment_value)} |
+| Financing-Adjusted ROV | {_fmt_m(ro.financing_adjusted_rov)} |
 
 The real-options premium is the additional value from being able to abandon the
 program on failure rather than being forced to pay the full investment cost regardless
@@ -1100,7 +1111,9 @@ of clinical outcome.
 
 ### Model Assumptions
 
-{assumptions}"""
+{assumptions}
+
+*Method status: {ro.method_status}*"""
 
 
 # ---------------------------------------------------------------------------
@@ -1130,7 +1143,9 @@ across the {len(ra.components)} primary risk drivers.
 **Total explained cashout probability shift:** {ra.explained_cashout_prob:+.1%}
 **Total explained EV shift:** {_fmt_m(ra.explained_ev)}
 
-*{ra.methodology_note}*"""
+*{ra.methodology_note}*
+
+*Method status: {ra.method_status}*"""
 
 
 # ---------------------------------------------------------------------------
@@ -1140,7 +1155,10 @@ across the {len(ra.components)} primary risk drivers.
 def _multistate_section(r: AuditResponse) -> str:
     ms = r.multi_state
     if ms is None:
-        return ""
+        return """## V. Multi-State Competing-Risk Analysis
+
+Multi-state engine available but not active for this audit.
+Set `simulation.use_multistate = true` in the request to enable the 8-state competing-risk model."""
 
     state_rows = "\n".join(
         f"| {name.replace('_', ' ').title()} | {prob:.1%} |"
@@ -1186,7 +1204,9 @@ def _multistate_section(r: AuditResponse) -> str:
 
 ### Model Assumptions
 
-{assumptions}"""
+{assumptions}
+
+*Method status: {ms.method_status}*"""
 
 
 # ---------------------------------------------------------------------------

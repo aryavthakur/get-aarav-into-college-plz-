@@ -497,6 +497,7 @@ class StateSpaceResult(BaseModel):
     effective_sample_size: float
     interpretation: str
     methodology_note: str
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "experimental_scaffold"
 
 
 class RobustnessResult(BaseModel):
@@ -513,6 +514,7 @@ class RobustnessResult(BaseModel):
     best_case_ev_e10: float
     robustness_interpretation: str
     methodology_note: str
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "heuristic"
 
 
 class ModelWeightSchema(BaseModel):
@@ -532,6 +534,7 @@ class BMAResult(BaseModel):
     highest_weight_model_k: float
     highest_weight_model_lambda: float
     methodology_note: str
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "heuristic"
 
 
 class DependenceAnalysisResult(BaseModel):
@@ -544,6 +547,7 @@ class DependenceAnalysisResult(BaseModel):
     negative_rho_dependence_effect: float
     negative_rho_interpretation: str
     methodology_note: str
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "heuristic"
 
 
 class RealOptionsResult(BaseModel):
@@ -556,7 +560,9 @@ class RealOptionsResult(BaseModel):
     real_options_premium: float
     real_options_premium_pct: float
     abandonment_value: float
+    financing_adjusted_rov: float = 0.0
     model_assumptions: List[str]
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "heuristic"
 
 
 class ShapleyComponentSchema(BaseModel):
@@ -575,6 +581,7 @@ class RiskAttributionResult(BaseModel):
     explained_cashout_prob: float
     explained_ev: float
     methodology_note: str
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "heuristic"
 
 
 class MultiStateResult(BaseModel):
@@ -596,6 +603,7 @@ class MultiStateResult(BaseModel):
         None, description="S(catalyst_month): probability of being in operating state at catalyst",
     )
     model_assumptions: List[str] = Field(default_factory=list)
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "experimental_scaffold"
 
 
 class SignalEVSISchema(BaseModel):
@@ -618,6 +626,7 @@ class ValueOfInformationResult(BaseModel):
     top_diligence_priority: str
     total_observable_evsi: float
     methodology_note: str
+    method_status: Literal["calibrated", "uncalibrated_assumption", "heuristic", "experimental_scaffold"] = "heuristic"
 
 
 class DataQualityResult(BaseModel):

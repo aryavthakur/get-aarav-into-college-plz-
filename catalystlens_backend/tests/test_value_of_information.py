@@ -20,37 +20,51 @@ from app.engines.monte_carlo import run_full_audit
 
 class TestEVPI:
     def test_evpi_nonnegative(self):
-        evpi = compute_evpi(alpha_posterior=3.0, beta_posterior=7.0, financing_adjusted_rnpv=50_000_000)
+        evpi = compute_evpi(
+            alpha_posterior=3.0, beta_posterior=7.0,
+            upside_value=100_000_000, capital_required=30_000_000,
+        )
         assert evpi >= 0.0
 
-    def test_evpi_zero_when_ev_strongly_positive(self):
-        """When EV is large relative to the signal, EVPI approaches 0."""
-        # With PoS = 3/10 and very high EV, the investment decision doesn't change
-        evpi = compute_evpi(alpha_posterior=3.0, beta_posterior=7.0, financing_adjusted_rnpv=1_000_000_000)
-        # EVPI = 0 when EV is so large it can't flip negative after one obs
+    def test_evpi_zero_when_no_capital_required(self):
+        """When capital_required=0 investor always invests regardless — EVPI=0."""
+        evpi = compute_evpi(
+            alpha_posterior=3.0, beta_posterior=7.0,
+            upside_value=100_000_000, capital_required=0.0,
+        )
         assert evpi == pytest.approx(0.0, abs=1.0)
 
-    def test_evpi_positive_when_ev_near_zero(self):
-        """When EV is near 0, a negative signal could flip the decision → EVPI > 0."""
-        # Set EV close to 0 (borderline investment) — info is most valuable here
-        evpi = compute_evpi(alpha_posterior=3.0, beta_posterior=7.0, financing_adjusted_rnpv=1_000)
-        assert evpi >= 0.0  # EVPI ≥ 0 always
+    def test_evpi_positive_when_decision_borderline(self):
+        """When invest_value≈0 (borderline), perfect info is most valuable."""
+        pos_mean = 3.0 / 10.0
+        upside = 100_000_000
+        # capital = pos_mean * upside → invest_value = 0 → decision is borderline
+        capital = pos_mean * upside
+        evpi = compute_evpi(
+            alpha_posterior=3.0, beta_posterior=7.0,
+            upside_value=upside, capital_required=capital,
+        )
+        assert evpi > 0.0
 
-    def test_evpi_zero_when_ev_negative(self):
-        """When current EV < 0, EVPI is the value of positive signal recovery."""
-        evpi = compute_evpi(alpha_posterior=3.0, beta_posterior=7.0, financing_adjusted_rnpv=-10_000_000)
-        # Can't lose from learning truth; EVPI should be positive
-        assert evpi >= 0.0
+    def test_evpi_zero_when_upside_less_than_capital(self):
+        """When success is never profitable (upside < capital), EVPI=0."""
+        evpi = compute_evpi(
+            alpha_posterior=3.0, beta_posterior=7.0,
+            upside_value=10_000_000, capital_required=20_000_000,
+        )
+        assert evpi == pytest.approx(0.0, abs=1.0)
 
-    def test_evpi_increases_with_uncertainty(self):
-        """More diffuse posterior (lower α+β) → higher uncertainty → higher EVPI."""
-        ev = 5_000_000
-        # Concentrated posterior (α+β large) vs diffuse (α+β small)
-        evpi_diffuse = compute_evpi(alpha_posterior=1.5, beta_posterior=3.5, financing_adjusted_rnpv=ev)
-        evpi_concentrate = compute_evpi(alpha_posterior=15.0, beta_posterior=35.0, financing_adjusted_rnpv=ev)
-        # More diffuse posterior → each new observation shifts mean more → higher EVSI
-        # (not strict inequality in all cases but generally holds for borderline EVs)
-        assert evpi_diffuse >= evpi_concentrate - 1.0
+    def test_evpi_equals_perfect_info_minus_decision(self):
+        """Verify EVPI = E[value under perfect info] - max(invest_value, 0)."""
+        alpha, beta = 4.0, 6.0
+        upside, capital = 80_000_000, 25_000_000
+        pos_mean = alpha / (alpha + beta)
+        invest_value = pos_mean * upside - capital
+        decision_value = max(invest_value, 0.0)
+        ev_perfect = pos_mean * max(upside - capital, 0.0)
+        expected_evpi = max(0.0, ev_perfect - decision_value)
+        evpi = compute_evpi(alpha, beta, upside, capital)
+        assert evpi == pytest.approx(expected_evpi, abs=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -61,36 +75,36 @@ class TestEVSI:
     def test_evsi_nonnegative(self):
         evsi, _, _ = compute_signal_evsi(
             alpha_posterior=3.0, beta_posterior=7.0,
-            signal_weight=1.5, financing_adjusted_rnpv=50_000_000
+            signal_weight=1.5, upside_value=100_000_000, capital_required=30_000_000,
         )
         assert evsi >= 0.0
 
     def test_heavier_signal_has_higher_evsi(self):
         """Stronger signal (higher weight) has at least as much EVSI."""
-        kwargs = dict(alpha_posterior=3.0, beta_posterior=7.0, financing_adjusted_rnpv=2_000_000)
+        kwargs = dict(
+            alpha_posterior=3.0, beta_posterior=7.0,
+            upside_value=100_000_000, capital_required=30_000_000,
+        )
         evsi_weak, _, _ = compute_signal_evsi(signal_weight=0.5, **kwargs)
         evsi_strong, _, _ = compute_signal_evsi(signal_weight=2.0, **kwargs)
         assert evsi_strong >= evsi_weak
 
-    def test_ev_if_positive_above_current_pos_fraction(self):
-        """After a positive observation, EV should be higher (or equal)."""
-        ev = 50_000_000
-        evsi, ev_pos, ev_neg = compute_signal_evsi(
+    def test_positive_signal_raises_invest_value(self):
+        """After a positive signal, the investment value for the positive case increases."""
+        _, iv_pos, iv_neg = compute_signal_evsi(
             alpha_posterior=3.0, beta_posterior=7.0,
-            signal_weight=1.0, financing_adjusted_rnpv=ev
+            signal_weight=1.0, upside_value=100_000_000, capital_required=30_000_000,
         )
-        # Positive signal raises PoS → raises EV
-        pos_mean = 3.0 / 10.0
-        assert ev_pos > ev * (3.0 + 1.0) / (10.0 + 1.0) / pos_mean * pos_mean - 1.0
+        # Positive signal raises PoS → raises investment value
+        assert iv_pos > iv_neg
 
-    def test_ev_if_negative_below_current(self):
-        """After a negative observation, EV should be lower (or equal)."""
-        ev = 50_000_000
-        evsi, ev_pos, ev_neg = compute_signal_evsi(
+    def test_negative_signal_lowers_invest_value(self):
+        """After a negative signal, investment value is lower than after positive."""
+        _, iv_pos, iv_neg = compute_signal_evsi(
             alpha_posterior=3.0, beta_posterior=7.0,
-            signal_weight=1.0, financing_adjusted_rnpv=ev
+            signal_weight=1.0, upside_value=100_000_000, capital_required=30_000_000,
         )
-        assert ev_neg < ev + 1.0  # negative signal lowers or at most equals EV
+        assert iv_neg < iv_pos
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +112,13 @@ class TestEVSI:
 # ---------------------------------------------------------------------------
 
 class TestRunVoI:
+    _UPSIDE = 100_000_000
+    _CAPITAL = 20_000_000
+
     def test_returns_correct_structure(self):
         result = run_value_of_information_analysis(
             alpha_posterior=3.0, beta_posterior=7.0,
-            financing_adjusted_rnpv=50_000_000,
+            upside_value=self._UPSIDE, capital_required=self._CAPITAL,
         )
         assert result.evpi_dollars >= 0.0
         assert isinstance(result.per_signal_evsi, list)
@@ -110,7 +127,7 @@ class TestRunVoI:
     def test_signals_ranked_by_evsi(self):
         result = run_value_of_information_analysis(
             alpha_posterior=3.0, beta_posterior=7.0,
-            financing_adjusted_rnpv=50_000_000,
+            upside_value=self._UPSIDE, capital_required=self._CAPITAL,
         )
         evsis = [s.evsi_dollars for s in result.per_signal_evsi]
         assert evsis == sorted(evsis, reverse=True), "Signals not ranked by EVSI (descending)"
@@ -118,7 +135,7 @@ class TestRunVoI:
     def test_total_evsi_equals_sum(self):
         result = run_value_of_information_analysis(
             alpha_posterior=3.0, beta_posterior=7.0,
-            financing_adjusted_rnpv=50_000_000,
+            upside_value=self._UPSIDE, capital_required=self._CAPITAL,
         )
         expected = sum(s.evsi_dollars for s in result.per_signal_evsi)
         assert result.total_observable_evsi == pytest.approx(expected, abs=1.0)
@@ -126,10 +143,40 @@ class TestRunVoI:
     def test_all_signal_evsis_nonnegative(self):
         result = run_value_of_information_analysis(
             alpha_posterior=5.0, beta_posterior=5.0,
-            financing_adjusted_rnpv=10_000_000,
+            upside_value=self._UPSIDE, capital_required=self._CAPITAL,
         )
         for s in result.per_signal_evsi:
             assert s.evsi_dollars >= 0.0, f"{s.signal_name} EVSI < 0"
+
+    def test_evpi_positive_at_borderline(self):
+        """EVPI is positive when the decision is exactly at the threshold."""
+        pos_mean = 5.0 / 10.0
+        upside = 100_000_000
+        capital = pos_mean * upside  # invest_value = 0
+        result = run_value_of_information_analysis(
+            alpha_posterior=5.0, beta_posterior=5.0,
+            upside_value=upside, capital_required=capital,
+        )
+        assert result.evpi_dollars > 0.0
+
+    def test_higher_signal_weight_increases_evsi_at_borderline(self):
+        """At the decision threshold, higher signal weight → higher EVSI."""
+        pos_mean = 3.0 / 10.0
+        upside = 100_000_000
+        capital = pos_mean * upside
+        r_low = run_value_of_information_analysis(
+            alpha_posterior=3.0, beta_posterior=7.0,
+            upside_value=upside, capital_required=capital,
+            config_signal_weights={"dose_response_observed": 0.5},
+        )
+        r_high = run_value_of_information_analysis(
+            alpha_posterior=3.0, beta_posterior=7.0,
+            upside_value=upside, capital_required=capital,
+            config_signal_weights={"dose_response_observed": 3.0},
+        )
+        dose_low = next(s for s in r_low.per_signal_evsi if s.signal_name == "dose_response_observed")
+        dose_high = next(s for s in r_high.per_signal_evsi if s.signal_name == "dose_response_observed")
+        assert dose_high.evsi_dollars >= dose_low.evsi_dollars
 
 
 # ---------------------------------------------------------------------------

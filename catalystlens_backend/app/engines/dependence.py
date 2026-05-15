@@ -88,6 +88,7 @@ def simulate_with_copula(
     t_sci_sorted: np.ndarray,
     rng: np.random.Generator,
     rho: float,
+    base_cashout_prob: float | None = None,
 ) -> CopulaResult:
     """
     Resample t_fin and t_sci with Gaussian copula rank correlation rho.
@@ -98,12 +99,19 @@ def simulate_with_copula(
     t_fin_sorted: original financing times sorted ascending (shape n,)
     t_sci_sorted: original science times sorted ascending (shape n,)
     rho: correlation in the Gaussian copula
+    base_cashout_prob: if provided, use as the independence baseline cashout probability
+        (computed from original paired arrays) to avoid the false independence baseline
+        from comparing independently-sorted arrays.
     """
     n = len(t_fin_sorted)
     assert len(t_sci_sorted) == n, "t_fin and t_sci must have equal length"
 
-    # Independent baseline
-    independent_cashout = float(np.mean(t_fin_sorted < t_sci_sorted))
+    # Use provided base cashout prob (computed on original paired arrays) to avoid
+    # the false independence baseline from comparing independently-sorted arrays.
+    if base_cashout_prob is not None:
+        independent_cashout = float(base_cashout_prob)
+    else:
+        independent_cashout = float(np.mean(t_fin_sorted < t_sci_sorted))
 
     # Copula resampling: draw (U_fin, U_sci) from copula, then
     # map back to empirical quantiles of the original sorted arrays.
@@ -170,9 +178,10 @@ def run_dependence_analysis(
     """
     t_fin_s = np.sort(t_fin)
     t_sci_s = np.sort(t_sci)
+    base_cashout = float(np.mean(t_fin < t_sci))  # paired comparison on originals
 
-    pos_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=+0.30)
-    neg_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=-0.20)
+    pos_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=+0.30, base_cashout_prob=base_cashout)
+    neg_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=-0.20, base_cashout_prob=base_cashout)
 
     return DependenceAnalysisResult(
         positive_rho=pos_result,
@@ -180,5 +189,5 @@ def run_dependence_analysis(
         negative_copula_cashout_prob=neg_result.copula_cashout_prob,
         negative_dependence_effect=neg_result.dependence_effect,
         negative_interpretation=neg_result.interpretation,
-        base_cashout_prob=round(float(np.mean(t_fin < t_sci)), 4),
+        base_cashout_prob=round(base_cashout, 4),
     )

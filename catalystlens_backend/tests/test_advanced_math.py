@@ -11,6 +11,8 @@ from app.engines.robustness import compute_robustness_bounds
 from app.engines.model_averaging import compute_bma, _CANDIDATE_MODELS
 from app.engines.dependence import run_dependence_analysis, simulate_with_copula
 from app.engines.monte_carlo import run_full_audit
+from app.engines.value_of_information import compute_evpi
+from app.engines.real_options import RealOptionsInput, simulate_real_options_value
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +196,7 @@ class TestAdvancedMathIntegration:
 
     def test_dro_report_section_present(self):
         r = run_full_audit(self._request())
-        assert "Distributional Robustness" in r.markdown_report
+        assert "Distributional Sensitivity Bounds" in r.markdown_report
 
     def test_bma_report_section_present(self):
         r = run_full_audit(self._request())
