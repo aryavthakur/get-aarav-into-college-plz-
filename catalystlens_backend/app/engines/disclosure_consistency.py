@@ -118,17 +118,19 @@ def calculate_jensen_shannon_divergence(
 
 def classify_disclosure_gap(
     jsd: float,
+    absolute_gap: float = 0.0,
     config: CatalystLensConfig | None = None,
 ) -> str:
-    """Classify disclosure gap based on JSD score."""
+    """Classify disclosure gap based on relative-shape and absolute-score gaps."""
     if config is None:
         config = get_default_config()
     t = config.disclosure_thresholds
-    if jsd <= t.aligned_jsd_max:
+    combined_gap = max(jsd, absolute_gap)
+    if combined_gap <= t.aligned_jsd_max:
         return "aligned"
-    if jsd <= t.mild_jsd_max:
+    if combined_gap <= t.mild_jsd_max:
         return "mild inconsistency"
-    if jsd <= t.material_jsd_max:
+    if combined_gap <= t.material_jsd_max:
         return "material inconsistency"
     return "severe inconsistency"
 
@@ -149,7 +151,8 @@ def _build_interpretation(jsd: float, gap_class: str, category_gaps: Dict[str, f
     if gap_class == "aligned":
         return (
             "The company's narrative framing is broadly consistent with the "
-            "structured model estimates. No material disclosure gap detected."
+            "structured model estimates across both relative category shape and "
+            "absolute category scores. No material disclosure gap detected."
         )
     elif gap_class == "mild inconsistency":
         return (
@@ -189,8 +192,13 @@ def run_disclosure_consistency_analysis(
     jsd = calculate_jensen_shannon_divergence(narrative, audit)
     kl_nva = calculate_kl_divergence(normalize_distribution(narrative), normalize_distribution(audit))
     kl_avn = calculate_kl_divergence(normalize_distribution(audit), normalize_distribution(narrative))
-    gap_class = classify_disclosure_gap(jsd, config)
     category_gaps = _build_category_gaps(narrative, audit)
+    absolute_gap_values = [abs(v) for v in category_gaps.values()]
+    mean_absolute_gap = float(np.mean(absolute_gap_values)) if absolute_gap_values else 0.0
+    optimism_bias = float(np.mean(list(category_gaps.values()))) if category_gaps else 0.0
+    max_category_gap = float(max(absolute_gap_values)) if absolute_gap_values else 0.0
+    combined_gap = 0.5 * jsd + 0.5 * mean_absolute_gap
+    gap_class = classify_disclosure_gap(jsd, combined_gap, config)
     interpretation = _build_interpretation(jsd, gap_class, category_gaps)
 
     keys = sorted(set(narrative.keys()) | set(audit.keys()))
@@ -201,6 +209,10 @@ def run_disclosure_consistency_analysis(
         jsd_score=round(jsd, 6),
         kl_narrative_vs_audit=round(kl_nva, 6),
         kl_audit_vs_narrative=round(kl_avn, 6),
+        mean_absolute_gap=round(mean_absolute_gap, 6),
+        optimism_bias=round(optimism_bias, 6),
+        max_category_gap=round(max_category_gap, 6),
+        combined_gap_score=round(combined_gap, 6),
         gap_classification=gap_class,
         category_gaps={k: round(v, 4) for k, v in category_gaps.items()},
         narrative_normalized={k: round(v, 4) for k, v in narrative_norm.items()},

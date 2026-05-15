@@ -22,7 +22,9 @@ Integrates all CatalystLens sub-engines into a single coherent simulation:
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -285,8 +287,6 @@ def _run_scenario(
     config: CatalystLensConfig,
 ) -> ScenarioResult:
     """Run one scenario with modified inputs and return ScenarioResult."""
-    import dataclasses
-
     fin_mod = copy.deepcopy(financial)
     clin_mod = copy.deepcopy(clinical)
     val_mod = copy.deepcopy(valuation)
@@ -339,6 +339,7 @@ def _run_scenario(
     val_result = run_valuation_simulation(
         t_sci, t_fin, pos_samples, val_mod, rng,
         market_condition_score=float(fin_mod.biotech_market_condition_score),
+        config=config,
     )
     ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
 
@@ -381,6 +382,7 @@ def _run_sensitivity(
         val_r = run_valuation_simulation(
             t_sci, t_fin, pos, val, rng,
             market_condition_score=float(fin.biotech_market_condition_score),
+            config=config,
         )
         return ctc.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv
 
@@ -451,6 +453,7 @@ def _run_sensitivity(
             val_r = run_valuation_simulation(
                 t_s, t_f, pos_s, val_mod, rng,
                 market_condition_score=float(fin_mod.biotech_market_condition_score),
+                config=config,
             )
             results.append((ctc_r.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv))
             if level == "low":
@@ -650,12 +653,29 @@ def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
     # Disclosure completeness
     narrative_cats = set(request.disclosure.company_narrative_distribution.keys())
     audit_cats = set(request.disclosure.structured_audit_distribution.keys())
-    missing_cats = _EXPECTED_DISCLOSURE_CATEGORIES - (narrative_cats | audit_cats)
-    disc_score = max(0.0, 1.0 - len(missing_cats) / len(_EXPECTED_DISCLOSURE_CATEGORIES) * 0.5)
-    if missing_cats:
-        limitations.append(f"Missing disclosure categories: {', '.join(sorted(missing_cats))}.")
+    missing_from_narrative = _EXPECTED_DISCLOSURE_CATEGORIES - narrative_cats
+    missing_from_audit = _EXPECTED_DISCLOSURE_CATEGORIES - audit_cats
+    missing_total = len(missing_from_narrative) + len(missing_from_audit)
+    max_missing = len(_EXPECTED_DISCLOSURE_CATEGORIES) * 2
+    disc_score = max(0.0, 1.0 - missing_total / max_missing)
+    if missing_from_narrative:
+        limitations.append(
+            f"Missing company narrative disclosure categories: {', '.join(sorted(missing_from_narrative))}."
+        )
+    if missing_from_audit:
+        limitations.append(
+            f"Missing structured audit disclosure categories: {', '.join(sorted(missing_from_audit))}."
+        )
+
+    total_liquidity = request.financial.cash_on_hand + request.financial.marketable_securities
+    force_overall_cap: float | None = None
+    if total_liquidity == 0:
+        fin_score = min(fin_score, 0.25)
+        force_overall_cap = 0.50
 
     overall = (fin_score + clin_score + disc_score) / 3.0
+    if force_overall_cap is not None:
+        overall = min(overall, force_overall_cap)
     overall = float(max(0.0, min(1.0, overall)))
     fin_score = float(max(0.0, min(1.0, fin_score)))
     clin_score = float(max(0.0, min(1.0, clin_score)))
@@ -680,8 +700,12 @@ def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
 
 
 def _build_model_version(config: CatalystLensConfig, sim_cfg: SimulationConfig) -> ModelVersionInfo:
-    config_repr = str(config.cox_coefficients) + str(config.weibull_params) + str(config.phase_priors)
-    config_hash = hashlib.md5(config_repr.encode()).hexdigest()[:8]
+    config_payload = {
+        "config": dataclasses.asdict(config),
+        "simulation": sim_cfg.model_dump(),
+    }
+    config_repr = json.dumps(config_payload, sort_keys=True, separators=(",", ":"), default=str)
+    config_hash = hashlib.sha256(config_repr.encode()).hexdigest()[:12]
     return ModelVersionInfo(
         backend_version="0.1.0",
         coefficient_set="mvp_untrained_v1",
@@ -780,6 +804,7 @@ def run_full_audit(
     val_result = run_valuation_simulation(
         t_sci, t_fin, pos_samples, valuation, rng,
         market_condition_score=float(financial.biotech_market_condition_score),
+        config=config,
     )
 
     # ---- Step 9: Scenario analysis ----

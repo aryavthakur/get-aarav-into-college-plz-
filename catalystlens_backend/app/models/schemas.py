@@ -5,7 +5,7 @@ Pydantic schemas for CatalystLens API — inputs, results, and audit response.
 from __future__ import annotations
 
 from typing import Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +148,14 @@ class DisclosureInput(BaseModel):
         }],
     )
 
+    @field_validator("company_narrative_distribution", "structured_audit_distribution")
+    @classmethod
+    def scores_must_be_unit_interval(cls, dist: Dict[str, float]) -> Dict[str, float]:
+        for key, value in dist.items():
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{key} must be between 0 and 1")
+        return dist
+
 
 class SimulationConfig(BaseModel):
     n_simulations: int = Field(10_000, ge=100, le=100_000)
@@ -164,6 +172,22 @@ class AuditRequest(BaseModel):
     valuation: ValuationInput
     disclosure: DisclosureInput
     simulation: SimulationConfig = Field(default_factory=SimulationConfig)
+    allow_phase_override: bool = Field(
+        False,
+        description="Set true only when intentionally using a PoS prior stage different from the clinical catalyst phase.",
+    )
+
+    @model_validator(mode="after")
+    def phase_inputs_must_match(self) -> "AuditRequest":
+        if (
+            not self.allow_phase_override
+            and self.clinical.trial_phase != self.success_probability.trial_phase
+        ):
+            raise ValueError(
+                "success_probability.trial_phase must match clinical.trial_phase "
+                "unless allow_phase_override is true"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +297,10 @@ class DisclosureConsistencyResult(BaseModel):
     jsd_score: float
     kl_narrative_vs_audit: float
     kl_audit_vs_narrative: float
+    mean_absolute_gap: float
+    optimism_bias: float
+    max_category_gap: float
+    combined_gap_score: float
     gap_classification: str
     category_gaps: Dict[str, float]
     narrative_normalized: Dict[str, float]

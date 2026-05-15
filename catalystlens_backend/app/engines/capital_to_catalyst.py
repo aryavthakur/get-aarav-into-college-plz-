@@ -64,7 +64,8 @@ def run_capital_to_catalyst_analysis(
         config = get_default_config()
 
     n = len(t_sci_samples)
-    assert len(t_fin_samples) == n, "Sample arrays must have equal length"
+    if len(t_fin_samples) != n:
+        raise ValueError("Sample arrays must have equal length")
 
     # Gap: positive = funded beyond catalyst, negative = cashout before catalyst
     gap = t_fin_samples - t_sci_samples

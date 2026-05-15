@@ -4,9 +4,13 @@ Tests for the Monte Carlo engine and capital-to-catalyst analysis.
 
 import pytest
 import numpy as np
+from pydantic import ValidationError
 
 from app.engines.capital_to_catalyst import classify_capital_risk, run_capital_to_catalyst_analysis
+from app.engines.disclosure_consistency import run_disclosure_consistency_analysis
 from app.engines.monte_carlo import run_full_audit
+from app.engines.valuation import run_valuation_simulation
+from app.core.config import CatalystLensConfig
 from app.models.schemas import (
     AuditRequest,
     ClinicalCatalystInput,
@@ -166,6 +170,12 @@ class TestCapitalToCatalystGap:
         result = run_capital_to_catalyst_analysis(t_sci, t_fin)
         assert result.median_gap_months < 0
 
+    def test_mismatched_sample_lengths_raise_value_error(self):
+        t_sci = np.array([10.0, 20.0, 30.0])
+        t_fin = np.array([15.0, 10.0])
+        with pytest.raises(ValueError, match="equal length"):
+            run_capital_to_catalyst_analysis(t_sci, t_fin)
+
 
 class TestCapitalToCatalystObvious:
     """
@@ -324,6 +334,24 @@ class TestAuditResponseStructure:
         assert "Data Quality" in result.markdown_report
         assert "UNCALIBRATED" in result.markdown_report
 
+    def test_report_uses_actual_financing_state_probabilities(self):
+        request = _make_audit_request(
+            cash_on_hand=12_000_000,
+            quarterly_burn=24_000_000,
+            stated_months=30,
+            n_simulations=3000,
+        )
+        result = run_full_audit(request)
+        report = result.markdown_report
+        valuation = result.valuation
+        for probability in (
+            valuation.p_funded_through_catalyst,
+            valuation.p_refinancing_success,
+            valuation.p_distressed_financing,
+            valuation.p_program_discontinuation,
+        ):
+            assert f"{probability:.1%}" in report
+
 
 class TestConfigIsolation:
     """Verify that concurrent requests with different seeds don't contaminate each other."""
@@ -341,6 +369,15 @@ class TestConfigIsolation:
         r1 = run_full_audit(req)
         r2 = run_full_audit(req)
         assert r1.model_version.config_hash == r2.model_version.config_hash
+
+    def test_config_hash_changes_when_signal_weights_change(self):
+        req = _make_audit_request(n_simulations=500, seed=42)
+        cfg_base = CatalystLensConfig()
+        cfg_changed = CatalystLensConfig()
+        cfg_changed.signal_weights.positive["validated_biomarker"] = 4.25
+        r1 = run_full_audit(req, config=cfg_base)
+        r2 = run_full_audit(req, config=cfg_changed)
+        assert r1.model_version.config_hash != r2.model_version.config_hash
 
     def test_repeated_audits_give_identical_results(self):
         """Ensures no global state mutation between calls."""
@@ -431,3 +468,95 @@ class TestFourStateFinancing:
         result = run_full_audit(request)
         not_funded = 1.0 - result.valuation.p_funded_through_catalyst
         assert not_funded > 0.50, f"Expected significant non-funded probability, got {not_funded:.1%}"
+
+    def test_financing_penalty_strength_changes_rnpv(self):
+        rng_seed = 123
+        t_sci = np.full(2000, 24.0)
+        t_fin = np.full(2000, 6.0)
+        pos = np.full(2000, 0.8)
+        base = ValuationInput(
+            asset_value_success=500_000_000,
+            downside_value=5_000_000,
+            annual_discount_rate=0.12,
+            expected_dilution_if_refinanced=0.35,
+            financing_penalty_strength=0.0,
+        )
+        penalized = base.model_copy(update={"financing_penalty_strength": 1.0})
+        r0 = run_valuation_simulation(
+            t_sci, t_fin, pos, base, np.random.default_rng(rng_seed), market_condition_score=5.0
+        )
+        r1 = run_valuation_simulation(
+            t_sci, t_fin, pos, penalized, np.random.default_rng(rng_seed), market_condition_score=5.0
+        )
+        assert r0.financing_adjusted_rnpv > r1.financing_adjusted_rnpv
+
+
+class TestDisclosureIntegrity:
+    def test_absolute_optimism_gap_flags_uniform_high_vs_low_scores(self):
+        high = {category: 0.9 for category in (
+            "runway_strength",
+            "clinical_timeline_confidence",
+            "dilution_risk",
+            "trial_maturity",
+            "endpoint_strength",
+            "pipeline_diversification",
+        )}
+        low = {category: 0.1 for category in high}
+        result = run_disclosure_consistency_analysis(
+            DisclosureInput(
+                company_narrative_distribution=high,
+                structured_audit_distribution=low,
+            )
+        )
+        assert result.jsd_score == pytest.approx(0.0)
+        assert result.mean_absolute_gap == pytest.approx(0.8)
+        assert result.optimism_bias == pytest.approx(0.8)
+        assert result.max_category_gap == pytest.approx(0.8)
+        assert result.gap_classification != "aligned"
+
+    def test_disclosure_scores_must_be_between_zero_and_one(self):
+        with pytest.raises(ValidationError, match="between 0 and 1"):
+            DisclosureInput(
+                company_narrative_distribution={"runway_strength": -0.1},
+                structured_audit_distribution={"runway_strength": 0.5},
+            )
+        with pytest.raises(ValidationError, match="between 0 and 1"):
+            DisclosureInput(
+                company_narrative_distribution={"runway_strength": 0.5},
+                structured_audit_distribution={"runway_strength": 1.2},
+            )
+
+    def test_disclosure_quality_penalizes_empty_audit_distribution(self):
+        request = _make_audit_request(n_simulations=500)
+        request = request.model_copy(update={
+            "disclosure": DisclosureInput(
+                company_narrative_distribution=request.disclosure.company_narrative_distribution,
+                structured_audit_distribution={},
+            )
+        })
+        result = run_full_audit(request)
+        assert result.data_quality.disclosure_data_completeness < 0.70
+        assert any("structured audit" in item.lower() for item in result.data_quality.primary_limitations)
+
+
+class TestDomainValidation:
+    def test_mismatched_clinical_and_pos_phase_is_rejected(self):
+        request = _make_audit_request(n_simulations=500)
+        with pytest.raises(ValidationError, match="trial_phase"):
+            AuditRequest(
+                financial=request.financial,
+                clinical=request.clinical,
+                success_probability=request.success_probability.model_copy(update={"trial_phase": "filed"}),
+                valuation=request.valuation,
+                disclosure=request.disclosure,
+                simulation=request.simulation,
+            )
+
+    def test_zero_liquidity_caps_data_quality(self):
+        request = _make_audit_request(cash_on_hand=0, quarterly_burn=30_000_000, n_simulations=500)
+        fin = request.financial.model_copy(update={"marketable_securities": 0})
+        request = request.model_copy(update={"financial": fin})
+        result = run_full_audit(request)
+        assert result.data_quality.financial_data_completeness <= 0.25
+        assert result.data_quality.overall_completeness <= 0.50
+        assert result.data_quality.data_quality_score != "high"

@@ -431,14 +431,8 @@ its valuation depends on?**
 
 
 def _dilution_section(r: AuditResponse, req: AuditRequest) -> str:
-    ctc = r.capital_to_catalyst
     val = r.valuation
     dilution = req.valuation.expected_dilution_if_refinanced
-
-    prob_no_financing = ctc.probability_reaches_catalyst
-    prob_tight = max(0.0, min(0.15, ctc.probability_reaches_catalyst * 0.15))
-    prob_financing_needed = ctc.probability_cashout_before_catalyst
-    prob_distressed = max(0.0, prob_financing_needed * 0.25)
 
     return f"""## H. Dilution and Refinancing Risk
 
@@ -450,10 +444,10 @@ value captured by current shareholders even in a successful clinical outcome.
 
 | Scenario | Modelled Probability | Estimated Effect |
 |---|---:|---|
-| No financing needed before catalyst | {_fmt_pct(prob_no_financing)} | Lower dilution risk; full option value preserved |
-| Financed within 6 months of catalyst | {_fmt_pct(prob_tight)} | Modest dilution; execution risk to financing timing |
-| Financing needed >6 months before catalyst | {_fmt_pct(max(0, prob_financing_needed - prob_distressed))} | High dilution risk; material shareholder impairment |
-| Distressed / below-market refinancing | {_fmt_pct(prob_distressed)} | Severe shareholder impairment risk |
+| Funded through catalyst | {_fmt_pct(val.p_funded_through_catalyst)} | Lower dilution risk; full option value preserved |
+| Clean refinancing before catalyst | {_fmt_pct(val.p_refinancing_success)} | Market-terms dilution; execution risk to financing timing |
+| Distressed / below-market refinancing | {_fmt_pct(val.p_distressed_financing)} | Severe shareholder impairment risk |
+| Program discontinuation / failed financing | {_fmt_pct(val.p_program_discontinuation)} | Program stalls; valuation collapses to downside case |
 
 **Assumed dilution if refinanced:** {_fmt_pct(dilution)}
 **Financing Risk Discount to rNPV:** {_fmt_m(val.financing_risk_discount)}
@@ -494,6 +488,10 @@ JSD is symmetric and bounded [0, 1]: 0 = perfect alignment, 1 = complete diverge
 | Metric | Value |
 |---|---:|
 | Jensen-Shannon Divergence | {disc.jsd_score:.4f} |
+| Mean Absolute Raw Gap | {disc.mean_absolute_gap:.4f} |
+| Optimism Bias | {disc.optimism_bias:+.4f} |
+| Maximum Category Gap | {disc.max_category_gap:.4f} |
+| Combined Gap Score | {disc.combined_gap_score:.4f} |
 | KL(Narrative ∥ Audit) | {disc.kl_narrative_vs_audit:.4f} |
 | KL(Audit ∥ Narrative) | {disc.kl_audit_vs_narrative:.4f} |
 | **Disclosure Gap Classification** | **{disc.gap_classification.upper()}** |

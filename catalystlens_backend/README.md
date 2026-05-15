@@ -72,7 +72,7 @@ API docs available at:
 pytest tests/ -v
 ```
 
-Expected output: 84 tests, all passing.
+Expected output: 107 tests, all passing.
 
 ---
 
