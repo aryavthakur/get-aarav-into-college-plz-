@@ -25,6 +25,16 @@ CatalystType = Literal[
     "regulatory_submission", "approval_decision", "proof_of_concept",
 ]
 FinancingEventKind = Literal["clean_refi", "distressed_refi", "partnership"]
+
+FinancingState = Literal[
+    "funded",
+    "clean_refinancing",
+    "distressed_refinancing",
+    "partnership",
+    "debt_or_royalty",
+    "program_discontinuation",
+    "cash_exhaustion",
+]
 CashPathState = Literal["continue", "cash_exhaustion", "horizon_reached"]
 SourceType = Literal["sec_filing", "clinicaltrials", "deck", "press_release", "manual_input"]
 
@@ -474,6 +484,8 @@ class DataQualityResult(BaseModel):
     overall_completeness: float = Field(ge=0.0, le=1.0)
     primary_limitations: List[str]
     data_quality_score: Literal["high", "moderate", "low"]
+    evidence_quality_score: Literal["high", "moderate", "low"] = "low"
+    evidence_quality_note: str = "All inputs are manual; no SEC/ClinicalTrials.gov source tracing applied."
 
 
 class ValidationSnapshot(BaseModel):

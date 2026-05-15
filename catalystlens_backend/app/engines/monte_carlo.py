@@ -169,6 +169,7 @@ def apply_cash_path_cap(
     sim_cfg: SimulationConfig,
     rng: np.random.Generator,
     planned_financing_events: list[FinancingEventInput] | None = None,
+    catalyst_month: float | None = None,
 ) -> tuple[np.ndarray, CashPathResult]:
     """Apply mechanical cash exhaustion as an upper bound on financial survival samples."""
     cash_path = simulate_cash_path(
@@ -177,6 +178,7 @@ def apply_cash_path_cap(
             monthly_burn=calculate_monthly_burn(financial.quarterly_operating_cash_burn),
             horizon_months=sim_cfg.monthly_horizon,
             financing_events=planned_financing_events or financial.planned_financing_events,
+            catalyst_month=catalyst_month,
         ),
         rng=rng,
     )
@@ -266,13 +268,15 @@ def _run_core_simulation(
     config: CatalystLensConfig,
     pos_alpha_override: Optional[float] = None,
     pos_beta_override: Optional[float] = None,
+    min_sci_months: float = 0.1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Run vectorised simulation core.
 
     pos_alpha_override / pos_beta_override allow the sensitivity engine to inject
-    modified Beta parameters without re-running the full signal update pipeline,
-    ensuring that PoS sensitivity actually changes the sampled success probabilities.
+    modified Beta parameters without re-running the full signal update pipeline.
+    min_sci_months floors t_sci samples at the minimum feasible public readout
+    timeline (enrollment + follow-up + cleaning + analysis + disclosure lag).
 
     Returns: (t_fin_samples, t_sci_samples, pos_samples)
     """
@@ -300,19 +304,16 @@ def _run_core_simulation(
     if pos_alpha_override is not None and pos_beta_override is not None:
         alpha_post, beta_post = pos_alpha_override, pos_beta_override
     else:
-        alpha_pr, beta_pr = build_success_prior_by_phase(
-            pos_input.trial_phase, config,
-            pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
-        )
-        alpha_post, beta_post, _, _ = update_beta_posterior(
-            alpha_pr, beta_pr,
-            pos_input.positive_signals, pos_input.negative_signals, config,
-        )
+        # Use the same hierarchical prior path as run_success_probability_analysis so that
+        # the posterior used in valuation exactly matches what the report displays.
+        _pos_result = run_success_probability_analysis(pos_input, config)
+        alpha_post = _pos_result.alpha_posterior
+        beta_post = _pos_result.beta_posterior
 
     gamma_alpha, gamma_beta_rate, _, _ = estimate_gamma_parameters(clinical, config)
 
     t_fin = sample_financial_failure_time(rng, rm, wp, n)
-    t_sci = sample_scientific_milestone_time(rng, gamma_alpha, gamma_beta_rate, n)
+    t_sci = sample_scientific_milestone_time(rng, gamma_alpha, gamma_beta_rate, n, min_months=min_sci_months)
     pos = sample_success_probability(rng, alpha_post, beta_post, n)
 
     return t_fin, t_sci, pos
@@ -428,21 +429,39 @@ def _run_sensitivity(
     rng: np.random.Generator,
     config: CatalystLensConfig,
     sim_cfg: SimulationConfig,
+    var_seed: int = 0,
 ) -> SensitivityPoint:
-    """Compute sensitivity of cashout probability and EV to one variable."""
+    """
+    Compute sensitivity of cashout probability and EV to one variable.
+
+    Common Random Numbers (CRN): all three levels (low/base/high) use the same
+    underlying random draws so directional comparisons are not confounded by
+    Monte Carlo noise. Each variable gets its own independent seeded sub-stream.
+    """
+    # Spawn a fresh, deterministic RNG for this variable — independent from the
+    # shared simulation rng so callers remain reproducible.
+    var_rng = np.random.default_rng(var_seed)
 
     def _sim(fin: CompanyFinancialInput, clin: ClinicalCatalystInput,
-             val: ValuationInput, ba: float) -> Tuple[float, float]:
+             val: ValuationInput, ba: float,
+             pos_alpha_override: Optional[float] = None,
+             pos_beta_override: Optional[float] = None) -> Tuple[float, float]:
+        # Save and restore RNG state so every level uses the same random draws (CRN).
+        saved_state = var_rng.bit_generator.state
         t_fin, t_sci, pos = _run_core_simulation(
-            fin, clin, pos_input, val, ba, n, rng, config
+            fin, clin, pos_input, val, ba, n, var_rng, config,
+            pos_alpha_override=pos_alpha_override,
+            pos_beta_override=pos_beta_override,
         )
-        t_fin, _ = apply_cash_path_cap(t_fin, fin, sim_cfg, rng)
+        t_fin, _ = apply_cash_path_cap(t_fin, fin, sim_cfg, var_rng)
         ctc = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
         val_r = run_valuation_simulation(
-            t_sci, t_fin, pos, val, rng,
+            t_sci, t_fin, pos, val, var_rng,
             market_condition_score=float(fin.biotech_market_condition_score),
             config=config,
         )
+        # Restore so the next level starts from the same draws.
+        var_rng.bit_generator.state = saved_state
         return ctc.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv
 
     field = variable_def["field"]
@@ -486,13 +505,10 @@ def _run_sensitivity(
             lbl = f"{mult:.0%} enroll rate"
 
         elif field == "pos_delta_mult":
-            a_pr, b_pr = build_success_prior_by_phase(
-                pos_input.trial_phase, config,
-                pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
-            )
-            a_po, b_po, _, _ = update_beta_posterior(
-                a_pr, b_pr, pos_input.positive_signals, pos_input.negative_signals, config
-            )
+            # Use hierarchical posterior (same path as run_success_probability_analysis).
+            _base_pos_result = run_success_probability_analysis(pos_input, config)
+            a_po = _base_pos_result.alpha_posterior
+            b_po = _base_pos_result.beta_posterior
             base_pos = a_po / (a_po + b_po)
             total_concentration = a_po + b_po
             mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
@@ -503,19 +519,9 @@ def _run_sensitivity(
             new_alpha = new_pos_mean * total_concentration
             new_beta = (1.0 - new_pos_mean) * total_concentration
             lbl = f"{new_pos_mean:.0%} PoS"
-            # Run real simulation with overridden PoS parameters
-            t_f, t_s, pos_s = _run_core_simulation(
-                fin_mod, clin_mod, pos_input, val_mod, ba_mod, n,
-                rng, config, pos_alpha_override=new_alpha, pos_beta_override=new_beta,
-            )
-            t_f, _ = apply_cash_path_cap(t_f, fin_mod, sim_cfg, rng)
-            ctc_r = run_capital_to_catalyst_analysis(t_s, t_f, config)
-            val_r = run_valuation_simulation(
-                t_s, t_f, pos_s, val_mod, rng,
-                market_condition_score=float(fin_mod.biotech_market_condition_score),
-                config=config,
-            )
-            results.append((ctc_r.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv))
+            cp, ev = _sim(fin_mod, clin_mod, val_mod, ba_mod,
+                          pos_alpha_override=new_alpha, pos_beta_override=new_beta)
+            results.append((cp, ev))
             if level == "low":
                 low_label = lbl
             elif level == "base":
@@ -756,6 +762,13 @@ def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
     else:
         quality_label = "low"
 
+    # Evidence quality is separate from completeness.
+    # Manual inputs can be 100% complete but still have low evidence quality.
+    # Source-traced provenance (SEC, ClinicalTrials.gov) raises evidence quality.
+    # For now, all inputs are manual; source ETL integration will upgrade this.
+    evidence_quality: str = "low"
+    evidence_note = "All inputs are manual; no SEC/ClinicalTrials.gov source tracing applied."
+
     return DataQualityResult(
         financial_data_completeness=round(fin_score, 2),
         clinical_data_completeness=round(clin_score, 2),
@@ -763,6 +776,8 @@ def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
         overall_completeness=round(overall, 2),
         primary_limitations=limitations,
         data_quality_score=quality_label,
+        evidence_quality_score=evidence_quality,
+        evidence_quality_note=evidence_note,
     )
 
 
@@ -909,8 +924,12 @@ def run_full_audit(
     t_fin, t_sci, pos_samples = _run_core_simulation(
         financial, clinical, pos_input, valuation,
         burn_result.burn_acceleration, n, streams.financing, config,
+        min_sci_months=milestone_result.public_readout_months,
     )
-    t_fin, cash_path_result = apply_cash_path_cap(t_fin, financial, sim_cfg, streams.cash)
+    t_fin, cash_path_result = apply_cash_path_cap(
+        t_fin, financial, sim_cfg, streams.cash,
+        catalyst_month=milestone_result.public_readout_months,
+    )
 
     # ---- Step 7: Capital-to-catalyst ----
     ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
@@ -937,11 +956,13 @@ def run_full_audit(
     n_sens = config.sensitivity_n_simulations
     base_cashout = ctc_result.probability_cashout_before_catalyst
     sensitivity: List[SensitivityPoint] = []
-    for var_def in _SENSITIVITY_VARS:
+    for var_idx, var_def in enumerate(_SENSITIVITY_VARS):
+        # Each variable gets a unique, reproducible seed for CRN across low/base/high levels.
+        var_seed = sim_cfg.random_seed ^ (var_idx * 0x9E3779B9 & 0xFFFFFFFF)
         sp = _run_sensitivity(
             var_def, financial, clinical, pos_input, valuation,
             burn_result.burn_acceleration, base_cashout, base_ev,
-            n_sens, rng, config, sim_cfg,
+            n_sens, rng, config, sim_cfg, var_seed=var_seed,
         )
         sensitivity.append(sp)
 

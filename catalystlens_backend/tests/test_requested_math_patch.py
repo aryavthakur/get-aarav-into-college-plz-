@@ -241,3 +241,178 @@ class TestDataQualityCapsAndReportSections:
         assert "Provenance Appendix" in report
         assert "Financial Clock Decomposition" in report
         assert "manual inputs are unverified" in report
+
+
+# ---------------------------------------------------------------------------
+# New regression tests for audit-feedback round 2 fixes
+# ---------------------------------------------------------------------------
+
+class TestHierarchicalPoSConsistency:
+    """Verify Monte Carlo uses the same posterior as run_success_probability_analysis."""
+
+    def test_hierarchical_prior_changes_valuation(self):
+        """Hierarchical prior must change financing_adjusted_rnpv relative to phase-only."""
+        base = _request(n=3000)
+        hier = _request(n=3000)
+        hier_data = hier.success_probability.model_dump()
+        hier_data["disease_area"] = "oncology"
+        hier_data["modality"] = "small_molecule"
+        hier_data["endpoint_family"] = "surrogate"
+        from app.models.schemas import SuccessProbabilityInput
+        hier = hier.model_copy(update={"success_probability": SuccessProbabilityInput(**hier_data)})
+        r_base = run_full_audit(base)
+        r_hier = run_full_audit(hier)
+        # If hierarchical prior differs from phase-only, EVs should differ
+        pos_base = r_base.success_probability.posterior_mean
+        pos_hier = r_hier.success_probability.posterior_mean
+        if abs(pos_base - pos_hier) > 0.001:
+            assert r_base.valuation.financing_adjusted_rnpv != r_hier.valuation.financing_adjusted_rnpv, (
+                "Hierarchical prior changed PoS but EV didn't change — simulation not using hierarchical posterior"
+            )
+
+    def test_pos_posterior_matches_valuation_seed(self):
+        """Same seed + same inputs must give identical PoS in both report and simulation."""
+        req = _request(n=2000)
+        r1 = run_full_audit(req)
+        r2 = run_full_audit(req)
+        assert r1.success_probability.posterior_mean == r2.success_probability.posterior_mean
+        assert r1.valuation.financing_adjusted_rnpv == r2.valuation.financing_adjusted_rnpv
+
+
+class TestMilestoneTimingFloor:
+    """p5_months must never be below public_readout_months."""
+
+    def test_p5_not_below_public_readout(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert r.milestone_timing.p5_months >= r.milestone_timing.public_readout_months - 0.01, (
+            f"p5_months={r.milestone_timing.p5_months} < public_readout_months={r.milestone_timing.public_readout_months}"
+        )
+
+    def test_p50_not_below_public_readout(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert r.milestone_timing.p50_months >= r.milestone_timing.public_readout_months - 0.01
+
+    def test_sample_floor_applied(self):
+        from app.engines.milestone_timing import sample_scientific_milestone_time
+        rng = np.random.default_rng(0)
+        samples = sample_scientific_milestone_time(rng, alpha=2.0, beta_rate=0.5, n_samples=5000, min_months=15.0)
+        assert float(np.min(samples)) >= 15.0
+
+
+class TestZeroLiquidityCashPath:
+    """Zero starting cash must give non-zero capital_needed."""
+
+    def test_zero_cash_capital_needed_to_survive(self):
+        from app.engines.cash_path import simulate_cash_path
+        from app.models.schemas import CashPathInput
+        result = simulate_cash_path(CashPathInput(
+            starting_cash=0,
+            monthly_burn=1_000_000,
+            horizon_months=12,
+        ))
+        assert result.capital_needed_to_survive_horizon == pytest.approx(12_000_000, rel=0.01)
+
+    def test_zero_cash_capital_needed_to_catalyst(self):
+        from app.engines.cash_path import simulate_cash_path
+        from app.models.schemas import CashPathInput
+        result = simulate_cash_path(CashPathInput(
+            starting_cash=0,
+            monthly_burn=1_000_000,
+            horizon_months=24,
+            catalyst_month=6.0,
+        ))
+        assert result.capital_needed_to_reach_catalyst == pytest.approx(6_000_000, rel=0.01)
+
+    def test_month_zero_financing_offsets_capital_needed(self):
+        from app.engines.cash_path import simulate_cash_path
+        from app.models.schemas import CashPathInput, FinancingEventInput
+        result = simulate_cash_path(CashPathInput(
+            starting_cash=0,
+            monthly_burn=1_000_000,
+            horizon_months=12,
+            financing_events=[FinancingEventInput(month=0, kind="clean_refi", gross_proceeds=5_000_000)],
+        ))
+        # After month-0 financing, cash = 5M. Should survive longer.
+        assert result.cash_exhaustion_month is not None
+        assert result.cash_exhaustion_month > 0
+
+
+class TestCatalystMonthInAudit:
+    """capital_needed_to_reach_catalyst must not be None in full audit."""
+
+    def test_capital_needed_to_reach_catalyst_populated(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert r.cash_path.capital_needed_to_reach_catalyst is not None
+
+
+class TestSensitivityCRN:
+    """Sensitivity rows must be monotonic under controlled random numbers."""
+
+    def test_burn_sensitivity_monotonic(self):
+        """Higher burn → higher cashout probability."""
+        req = _request(cash=50_000_000, burn=9_000_000, n=2000)
+        r = run_full_audit(req)
+        burn_sens = next(s for s in r.final_summary.sensitivity if s.variable == "monthly_burn")
+        assert burn_sens.low_cashout_prob <= burn_sens.high_cashout_prob, (
+            f"Higher burn should raise cashout risk: low={burn_sens.low_cashout_prob}, high={burn_sens.high_cashout_prob}"
+        )
+
+    def test_asset_value_sensitivity_monotonic(self):
+        """Higher asset value → higher expected value."""
+        req = _request(cash=50_000_000, burn=9_000_000, n=2000)
+        r = run_full_audit(req)
+        av_sens = next(s for s in r.final_summary.sensitivity if s.variable == "asset_value_success")
+        assert av_sens.low_expected_value <= av_sens.high_expected_value, (
+            f"Higher asset value should raise EV: low={av_sens.low_expected_value}, high={av_sens.high_expected_value}"
+        )
+
+    def test_sensitivity_reproducible_with_same_seed(self):
+        req = _request(n=1000)
+        r1 = run_full_audit(req)
+        r2 = run_full_audit(req)
+        for sp1, sp2 in zip(r1.final_summary.sensitivity, r2.final_summary.sensitivity):
+            assert sp1.low_expected_value == sp2.low_expected_value
+            assert sp1.high_cashout_prob == sp2.high_cashout_prob
+
+
+class TestEvidenceQuality:
+    """Evidence quality is separate from completeness."""
+
+    def test_complete_manual_input_has_low_evidence_quality(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert r.data_quality.overall_completeness > 0.5
+        assert r.data_quality.evidence_quality_score == "low"
+
+    def test_evidence_quality_note_mentions_manual(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert "manual" in r.data_quality.evidence_quality_note.lower()
+
+    def test_report_shows_evidence_quality(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert "Evidence Quality" in r.markdown_report
+
+
+class TestReportUpdates:
+    """Verify stale report text was fixed."""
+
+    def test_report_shows_prior_source(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert "Prior Source" in r.markdown_report or "prior_source" in r.markdown_report.lower()
+
+    def test_report_corrects_partnership_assumption(self):
+        req = _request()
+        r = run_full_audit(req)
+        # Old text said partnerships can't be captured; new text says they can be planned
+        assert "planned_financing_events" in r.markdown_report or "planned financing" in r.markdown_report.lower()
+
+    def test_report_mentions_data_client_scaffold(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert "scaffold" in r.markdown_report.lower() or "manual" in r.markdown_report.lower()

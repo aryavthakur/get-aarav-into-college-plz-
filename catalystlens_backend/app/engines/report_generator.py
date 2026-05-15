@@ -359,12 +359,30 @@ def _bayesian_pos_section(r: AuditResponse, req: AuditRequest) -> str:
     delta_pos = pos.posterior_mean - pos.prior_mean
     delta_direction = "upward" if delta_pos > 0 else "downward"
 
+    prior_src = getattr(pos, "prior_source", "mvp_phase_prior")
+    prior_conf = getattr(pos, "prior_confidence", 0.35)
+    prior_fb = getattr(pos, "prior_fallback_level", "phase_only")
+    disease_area = getattr(req.success_probability, "disease_area", None) or "—"
+    modality = getattr(req.success_probability, "modality", None) or "—"
+    endpoint_family = getattr(req.success_probability, "endpoint_family", None) or "—"
+
     return f"""## F. Bayesian Probability of Technical Success
 
-The model begins with a phase-specific Beta distribution prior encoding the
-historical industry-wide probability of technical success from the stated
-development stage to regulatory approval. It then updates this prior using
-weighted trial-specific evidence signals.
+The model begins with a Beta distribution prior encoding the industry-wide
+probability of technical success. It uses a hierarchical lookup (phase → disease area
+→ modality → endpoint family) when strata are supplied; otherwise falls back to the
+phase-only MVP prior. It then updates this prior using weighted trial-specific signals.
+
+### Prior Metadata
+
+| Field | Value |
+|---|---|
+| Prior Source | `{prior_src}` |
+| Prior Confidence | {prior_conf:.0%} |
+| Fallback Level | `{prior_fb}` |
+| Disease Area | {disease_area} |
+| Modality | {modality} |
+| Endpoint Family | {endpoint_family} |
 
 ### Positive Evidence Signals
 
@@ -382,7 +400,7 @@ weighted trial-specific evidence signals.
 
 | Metric | Value |
 |---|---:|
-| Phase-Specific Prior | Beta({pos.alpha_prior:.1f}, {pos.beta_prior:.1f}) |
+| Prior Distribution | Beta({pos.alpha_prior:.1f}, {pos.beta_prior:.1f}) |
 | Prior Mean PoS | {_fmt_pct(pos.prior_mean)} |
 | Evidence Update | +{sum(pos.applied_positive_weights.values()):.2f} to α, +{sum(pos.applied_negative_weights.values()):.2f} to β |
 | Posterior Distribution | Beta({pos.alpha_posterior:.1f}, {pos.beta_posterior:.1f}) |
@@ -390,13 +408,12 @@ weighted trial-specific evidence signals.
 | {pos.credible_interval_pct:.0f}% Credible Interval | {_fmt_pct(ci_l)} – {_fmt_pct(ci_u)} |
 
 The evidence signals shifted the posterior {delta_direction} by {abs(delta_pos):.1%} relative
-to the phase prior.
+to the prior mean.
 
 > **Model note:** The posterior PoS should be interpreted as a model-updated
-> estimate based on available trial-specific signals. It reflects the Beta-binomial
-> framework's weighted assessment of the evidence, not a regulatory probability
-> of approval or a commercial success probability. Signal weights are untrained
-> MVP assumptions configurable in config.py."""
+> estimate based on available trial-specific signals. The same posterior used here
+> is passed directly to the valuation Monte Carlo — report and simulation are consistent.
+> Signal weights are untrained MVP assumptions configurable in config.py."""
 
 
 def _ctc_section(r: AuditResponse, req: AuditRequest) -> str:
@@ -669,13 +686,16 @@ def _assumptions_section(r: AuditResponse) -> str:
   data; they represent directional expert priors.
 - Clinical milestone timing uses a Gamma distribution parameterised from the stated
   management timeline; actual timelines may differ materially.
-- The model does not capture strategic transactions, partnerships, licensing revenue,
-  or non-dilutive financing that could extend runway.
+- The model can mechanically include planned financing inflows
+  (ATM, PIPE, partnership upfront, debt) via planned_financing_events. It does not
+  independently estimate the probability, economics, or terms of unplanned transactions.
 - rNPV outputs are mechanical functions of user-supplied asset value assumptions.
 - Public filings may not reflect recent financing activity, confidential partnership
   discussions, or protocol amendments not yet disclosed.
 - The Jensen-Shannon divergence disclosure score is based on user-supplied narrative
-  and audit distributions; it does not independently analyse SEC filings or press releases."""
+  and audit distributions; it does not independently analyse SEC filings or press releases.
+- SEC, ClinicalTrials.gov, and FRED data clients are scaffolded but not yet integrated
+  into the audit path. All inputs in /audit are manual unless provenance fields are supplied."""
 
 
 def _conclusion_section(r: AuditResponse, req: AuditRequest) -> str:
@@ -750,27 +770,36 @@ not replace, professional analyst diligence and institutional risk management pr
 
 def _data_quality_section(r: AuditResponse) -> str:
     dq = r.data_quality
-    score_label = {"high": "High ✓", "moderate": "Moderate ⚠", "low": "Low ✗"}.get(
+    completeness_label = {"high": "High ✓", "moderate": "Moderate ⚠", "low": "Low ✗"}.get(
         dq.data_quality_score, dq.data_quality_score
+    )
+    evidence_label = {"high": "High ✓", "moderate": "Moderate ⚠", "low": "Low ✗"}.get(
+        dq.evidence_quality_score, dq.evidence_quality_score
     )
     limitations = "\n".join(f"- {lim}" for lim in dq.primary_limitations) if dq.primary_limitations else "- None identified."
 
     return f"""## P. Data Quality Assessment
 
-| Dimension | Completeness | Notes |
+**Data completeness** measures whether required fields were supplied.
+**Evidence quality** measures whether inputs are source-traced to verifiable external data
+(SEC filings, ClinicalTrials.gov, FRED) vs. manually entered. A complete manual input
+is not the same as a verified source-traced input.
+
+| Dimension | Score | Notes |
 |---|---|---|
-| Financial Data | {dq.financial_data_completeness:.0%} | Burn history, liquidity, market inputs |
-| Clinical Data | {dq.clinical_data_completeness:.0%} | Enrollment, timeline, complexity scores |
-| Disclosure Data | {dq.disclosure_data_completeness:.0%} | Narrative vs structured audit categories |
-| **Overall** | **{dq.overall_completeness:.0%}** | **{score_label}** |
+| Financial Data Completeness | {dq.financial_data_completeness:.0%} | Burn history, liquidity, market inputs |
+| Clinical Data Completeness | {dq.clinical_data_completeness:.0%} | Enrollment, timeline, complexity scores |
+| Disclosure Data Completeness | {dq.disclosure_data_completeness:.0%} | Narrative vs structured audit categories |
+| **Overall Completeness** | **{dq.overall_completeness:.0%}** | **{completeness_label}** |
+| **Evidence Quality** | **{evidence_label}** | {dq.evidence_quality_note} |
 
 ### Primary Data Limitations
 
 {limitations}
 
-> Data quality affects model confidence. Low-completeness inputs reduce the
-> reliability of probabilistic outputs. Treat low-quality model results as
-> directional indicators only."""
+> Low evidence quality does not invalidate completeness, but it means outputs cannot
+> be cross-checked against independent data sources. All manual inputs are unverified
+> unless provenance is explicitly source-traced."""
 
 
 def _model_validation_section(r: AuditResponse) -> str:
