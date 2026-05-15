@@ -78,6 +78,27 @@ class _MockAudit:
     valuation = _MockValuation()
 
 
+class _ExactValuation:
+    p_refinancing_success = 0.9
+    p_distressed_financing = 0.0
+    p_program_discontinuation = 0.0
+    p_any_financing_event_before_catalyst = 0.25
+    p_financing_pressure_before_catalyst = 0.10
+    p_program_discontinuation_before_catalyst = 0.05
+    p_clean_refinancing_before_catalyst = 0.15
+    p_distressed_refinancing_before_catalyst = 0.05
+    p_partnership_before_catalyst = 0.05
+    p_debt_or_royalty_before_catalyst = 0.0
+    p_cash_exhaustion_before_catalyst = 0.0
+    p_nondilutive_financing_before_catalyst = 0.05
+    p_dilutive_financing_before_catalyst = 0.20
+
+
+class _ExactAudit:
+    capital_to_catalyst = _MockCapitalToCatalyst()
+    valuation = _ExactValuation()
+
+
 class TestHistoricalSchemas:
     def test_valid_example_accepts_point_in_time_case(self):
         ex = _example()
@@ -167,6 +188,27 @@ class TestTargetProbabilityMapping:
         assert extract_actual_label(financed, "reached_catalyst_before_financing_pressure") is False
         assert extract_actual_label(discontinued, "reached_catalyst_before_financing_pressure") is False
 
+    def test_cash_distress_blocks_reached_label(self):
+        distressed = _example(
+            actual_readout_date="2023-04-15",
+            financing_before_catalyst=False,
+            program_discontinued_before_catalyst=False,
+            cash_distress_or_going_concern_before_catalyst=True,
+        )
+
+        assert extract_actual_label(distressed, "reached_catalyst_before_financing_pressure") is False
+
+    def test_financing_target_uses_exact_field_when_available(self):
+        probability, note = probability_for_target(_ExactAudit(), "financing_before_catalyst")
+
+        assert probability == pytest.approx(0.25)
+        assert "exact financing-state fields used" in note.lower()
+
+    def test_reached_target_subtracts_pressure_not_any_financing(self):
+        probability, _ = probability_for_target(_ExactAudit(), "reached_catalyst_before_financing_pressure")
+
+        assert probability == pytest.approx(0.60)
+
 
 class TestSyntheticBacktest:
     def test_synthetic_dataset_loads(self):
@@ -202,6 +244,9 @@ class TestSyntheticBacktest:
         assert "synthetic test data and does not validate model performance" in report
         assert "Label Definition and Probability Mapping" in report
         assert "broader than cash exhaustion" in report
+        assert "p_any_financing_event_before_catalyst" in report
+        assert "p_financing_pressure_before_catalyst" in report
+        assert "clean/proactive financing" in report
 
     def test_target_values_use_financing_probability_field(self):
         result = run_backtest(load_historical_examples(DATASET_PATH))

@@ -30,8 +30,8 @@ def generate_backtest_report(result: BacktestResult) -> str:
     warnings = "\n".join(f"- {w}" for w in result.warnings) or "- None"
     target = TARGET_DEFINITIONS[result.target_name]
     mapping_warning = (
-        "\n> Probability mapping is approximate because the current audit response does not expose all "
-        "financing-state probabilities.\n"
+        "\n> Probability mapping may use approximate fallback logic for older audit responses that do not expose "
+        "explicit financing-state probabilities.\n"
         if target.approximate else ""
     )
     return f"""# CatalystLens Backtest Report
@@ -55,6 +55,8 @@ Target: `{result.target_name}`
 - Probability source: {target.probability_source}
 - Mapping exact: `{not target.approximate}`
 - Fallback logic: {target.fallback_logic}
+- Exact aggregate fields when exposed: `p_any_financing_event_before_catalyst` and `p_financing_pressure_before_catalyst`
+- Reached-catalyst mapping subtracts financing pressure, not all financing events; clean/proactive financing is tracked separately from distress.
 
 For synthetic datasets, this target is a pipeline smoke test only and is not evidence of real-world calibration.
 

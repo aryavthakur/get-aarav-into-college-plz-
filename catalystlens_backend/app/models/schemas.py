@@ -418,6 +418,17 @@ class ValuationResult(BaseModel):
     p_refinancing_success: float = 0.0
     p_distressed_financing: float = 0.0
     p_program_discontinuation: float = 0.0
+    # Explicit before-catalyst financing state probabilities for validation/backtesting
+    p_clean_refinancing_before_catalyst: float = 0.0
+    p_distressed_refinancing_before_catalyst: float = 0.0
+    p_partnership_before_catalyst: float = 0.0
+    p_debt_or_royalty_before_catalyst: float = 0.0
+    p_cash_exhaustion_before_catalyst: float = 0.0
+    p_program_discontinuation_before_catalyst: float = 0.0
+    p_any_financing_event_before_catalyst: float = 0.0
+    p_financing_pressure_before_catalyst: float = 0.0
+    p_nondilutive_financing_before_catalyst: float = 0.0
+    p_dilutive_financing_before_catalyst: float = 0.0
     mean_value_if_funded: float = 0.0
     mean_value_if_refinanced: float = 0.0
     mean_value_if_distressed: float = 0.0
