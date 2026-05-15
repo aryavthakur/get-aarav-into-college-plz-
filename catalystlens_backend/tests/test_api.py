@@ -7,6 +7,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+import app.api.routes as routes
 from app.main import app
 
 client = TestClient(app)
@@ -143,6 +144,27 @@ class TestAuditEndpoint:
     def test_audit_invalid_payload_returns_422(self):
         response = client.post("/audit", json={"invalid": "payload"})
         assert response.status_code == 422
+
+    def test_audit_domain_value_error_returns_400(self, monkeypatch):
+        def raise_value_error(request):
+            raise ValueError("domain rule failed")
+
+        monkeypatch.setattr(routes, "run_full_audit", raise_value_error)
+        payload = _load_example_payload()
+        response = client.post("/audit", json=payload)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "domain rule failed"
+
+    def test_audit_unexpected_error_returns_generic_500(self, monkeypatch):
+        def raise_runtime_error(request):
+            raise RuntimeError("secret internals")
+
+        monkeypatch.setattr(routes, "run_full_audit", raise_runtime_error)
+        payload = _load_example_payload()
+        response = client.post("/audit", json=payload)
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal engine error. See server logs."
+        assert "secret internals" not in response.text
 
 
 class TestSolvencyEndpoint:

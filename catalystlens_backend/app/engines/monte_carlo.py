@@ -61,9 +61,11 @@ from app.models.schemas import (
     AuditRequest,
     AuditResponse,
     CashPathInput,
+    CashPathResult,
     ClinicalCatalystInput,
     CompanyFinancialInput,
     DataQualityResult,
+    FinancingEventInput,
     FinalSummaryResult,
     ModelVersionInfo,
     ProvenanceBundle,
@@ -159,6 +161,28 @@ def spawn_streams(seed: int) -> RNGStreams:
         science=np.random.default_rng(science),
         valuation=np.random.default_rng(valuation),
     )
+
+
+def apply_cash_path_cap(
+    t_fin: np.ndarray,
+    financial: CompanyFinancialInput,
+    sim_cfg: SimulationConfig,
+    rng: np.random.Generator,
+    planned_financing_events: list[FinancingEventInput] | None = None,
+) -> tuple[np.ndarray, CashPathResult]:
+    """Apply mechanical cash exhaustion as an upper bound on financial survival samples."""
+    cash_path = simulate_cash_path(
+        CashPathInput(
+            starting_cash=compute_total_liquidity(financial),
+            monthly_burn=calculate_monthly_burn(financial.quarterly_operating_cash_burn),
+            horizon_months=sim_cfg.monthly_horizon,
+            financing_events=planned_financing_events or financial.planned_financing_events,
+        ),
+        rng=rng,
+    )
+    if cash_path.cash_exhaustion_month is None:
+        return t_fin, cash_path
+    return np.minimum(t_fin, float(cash_path.cash_exhaustion_month)), cash_path
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +340,7 @@ def _run_scenario(
     n: int,
     rng: np.random.Generator,
     config: CatalystLensConfig,
+    sim_cfg: SimulationConfig,
 ) -> ScenarioResult:
     """Run one scenario with modified inputs and return ScenarioResult."""
     fin_mod = copy.deepcopy(financial)
@@ -364,6 +389,7 @@ def _run_scenario(
         fin_mod, clin_mod, pos_mod, val_mod,
         burn_acceleration * burn_mult, n, rng, config,
     )
+    t_fin, _ = apply_cash_path_cap(t_fin, fin_mod, sim_cfg, rng)
     # Override pos_samples with scenario-adjusted mean (rescale beta)
     pos_samples = np.clip(pos_samples * (new_pos_mean / max(base_pos_mean, 0.01)), 0.01, 0.99)
 
@@ -401,6 +427,7 @@ def _run_sensitivity(
     n: int,
     rng: np.random.Generator,
     config: CatalystLensConfig,
+    sim_cfg: SimulationConfig,
 ) -> SensitivityPoint:
     """Compute sensitivity of cashout probability and EV to one variable."""
 
@@ -409,6 +436,7 @@ def _run_sensitivity(
         t_fin, t_sci, pos = _run_core_simulation(
             fin, clin, pos_input, val, ba, n, rng, config
         )
+        t_fin, _ = apply_cash_path_cap(t_fin, fin, sim_cfg, rng)
         ctc = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
         val_r = run_valuation_simulation(
             t_sci, t_fin, pos, val, rng,
@@ -480,6 +508,7 @@ def _run_sensitivity(
                 fin_mod, clin_mod, pos_input, val_mod, ba_mod, n,
                 rng, config, pos_alpha_override=new_alpha, pos_beta_override=new_beta,
             )
+            t_f, _ = apply_cash_path_cap(t_f, fin_mod, sim_cfg, rng)
             ctc_r = run_capital_to_catalyst_analysis(t_s, t_f, config)
             val_r = run_valuation_simulation(
                 t_s, t_f, pos_s, val_mod, rng,
@@ -703,8 +732,15 @@ def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
     if total_liquidity == 0:
         fin_score = min(fin_score, 0.25)
         force_overall_cap = 0.50
+    if not request.financial.quarterly_burn_history:
+        fin_score = min(fin_score, 0.80)
 
     overall = (fin_score + clin_score + disc_score) / 3.0
+    component_min = min(fin_score, clin_score, disc_score)
+    if component_min <= 0.25:
+        overall = min(overall, 0.55)
+    elif component_min <= 0.50:
+        overall = min(overall, 0.70)
     if force_overall_cap is not None:
         overall = min(overall, force_overall_cap)
     overall = float(max(0.0, min(1.0, overall)))
@@ -860,16 +896,6 @@ def run_full_audit(
         monthly_horizon=sim_cfg.monthly_horizon,
     )
 
-    # ---- Step 2b: Mechanical cash path ----
-    cash_path_result = simulate_cash_path(
-        CashPathInput(
-            starting_cash=compute_total_liquidity(financial),
-            monthly_burn=calculate_monthly_burn(financial.quarterly_operating_cash_burn),
-            horizon_months=sim_cfg.monthly_horizon,
-        ),
-        rng=streams.cash,
-    )
-
     # ---- Step 3: Milestone timing ----
     milestone_result = run_milestone_timing_analysis(clinical, config)
 
@@ -884,8 +910,7 @@ def run_full_audit(
         financial, clinical, pos_input, valuation,
         burn_result.burn_acceleration, n, streams.financing, config,
     )
-    if cash_path_result.cash_exhaustion_month is not None:
-        t_fin = np.minimum(t_fin, float(cash_path_result.cash_exhaustion_month))
+    t_fin, cash_path_result = apply_cash_path_cap(t_fin, financial, sim_cfg, streams.cash)
 
     # ---- Step 7: Capital-to-catalyst ----
     ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
@@ -904,7 +929,7 @@ def run_full_audit(
     for sc_def in _SCENARIOS:
         sc_result = _run_scenario(
             sc_def, financial, clinical, pos_input, valuation,
-            burn_result.burn_acceleration, base_ev, n_scen, rng, config,
+            burn_result.burn_acceleration, base_ev, n_scen, rng, config, sim_cfg,
         )
         scenarios.append(sc_result)
 
@@ -916,7 +941,7 @@ def run_full_audit(
         sp = _run_sensitivity(
             var_def, financial, clinical, pos_input, valuation,
             burn_result.burn_acceleration, base_cashout, base_ev,
-            n_sens, rng, config,
+            n_sens, rng, config, sim_cfg,
         )
         sensitivity.append(sp)
 

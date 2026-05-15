@@ -1,0 +1,44 @@
+{
+  "phase_2": {
+    "alpha": 3.0,
+    "beta": 7.0,
+    "source": "phase_only_default_hierarchical_v1",
+    "confidence": 0.35
+  },
+  "phase_2|oncology": {
+    "alpha": 2.4,
+    "beta": 7.6,
+    "source": "disease_area_default_hierarchical_v1",
+    "confidence": 0.45
+  },
+  "phase_2|oncology|small_molecule": {
+    "alpha": 2.8,
+    "beta": 7.2,
+    "source": "disease_modality_default_hierarchical_v1",
+    "confidence": 0.5
+  },
+  "phase_2|oncology|small_molecule|surrogate": {
+    "alpha": 3.6,
+    "beta": 6.4,
+    "source": "disease_modality_endpoint_default_hierarchical_v1",
+    "confidence": 0.55
+  },
+  "phase_2|rare_disease": {
+    "alpha": 3.4,
+    "beta": 6.6,
+    "source": "disease_area_default_hierarchical_v1",
+    "confidence": 0.45
+  },
+  "phase_3": {
+    "alpha": 5.0,
+    "beta": 5.0,
+    "source": "phase_only_default_hierarchical_v1",
+    "confidence": 0.35
+  },
+  "phase_3|oncology": {
+    "alpha": 4.2,
+    "beta": 5.8,
+    "source": "disease_area_default_hierarchical_v1",
+    "confidence": 0.45
+  }
+}

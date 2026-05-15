@@ -64,8 +64,10 @@ def full_audit(request: AuditRequest) -> AuditResponse:
     """
     try:
         return run_full_audit(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Audit engine error: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
 
 
 @router.post("/solvency", response_model=SolvencyResult, tags=["engines"])
@@ -73,8 +75,10 @@ def solvency_only(financial: CompanyFinancialInput) -> SolvencyResult:
     """Run the financial solvency (survival) model only."""
     try:
         return run_solvency_analysis(financial)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
 
 
 @router.post("/success-probability", response_model=SuccessProbabilityResult, tags=["engines"])
@@ -82,8 +86,10 @@ def success_probability_only(inputs: SuccessProbabilityInput) -> SuccessProbabil
     """Run the Bayesian probability of technical success model only."""
     try:
         return run_success_probability_analysis(inputs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
 
 
 @router.post("/milestone-timing", response_model=MilestoneTimingResult, tags=["engines"])
@@ -91,8 +97,10 @@ def milestone_timing_only(clinical: ClinicalCatalystInput) -> MilestoneTimingRes
     """Run the Gamma milestone timing model only."""
     try:
         return run_milestone_timing_analysis(clinical)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
 
 
 @router.post("/burn-regime", response_model=BurnRegimeResult, tags=["engines"])
@@ -100,8 +108,10 @@ def burn_regime_only(financial: CompanyFinancialInput) -> BurnRegimeResult:
     """Run burn-rate change point detection only."""
     try:
         return run_burn_regime_analysis(financial)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
 
 
 @router.post("/disclosure-consistency", response_model=DisclosureConsistencyResult, tags=["engines"])
@@ -109,8 +119,10 @@ def disclosure_consistency_only(inputs: DisclosureInput) -> DisclosureConsistenc
     """Run disclosure consistency (Jensen-Shannon divergence) analysis only."""
     try:
         return run_disclosure_consistency_analysis(inputs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
 
 
 @router.post("/simulate", response_model=AuditResponse, tags=["audit"])
@@ -123,5 +135,7 @@ def simulate(request: AuditRequest) -> AuditResponse:
     """
     try:
         return run_full_audit(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Simulation engine error: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
