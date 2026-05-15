@@ -67,6 +67,7 @@ from app.engines.solvency import (
 )
 from app.engines.valuation import run_valuation_simulation
 from app.engines.dependence import run_dependence_analysis
+from app.engines.state_space import StateSpaceParams, run_state_space_analysis
 from app.engines.model_averaging import compute_bma
 from app.engines.real_options import RealOptionsInput, simulate_real_options_value
 from app.engines.risk_attribution import compute_shapley_attribution
@@ -87,6 +88,7 @@ from app.models.schemas import (
     DependenceAnalysisResult,
     ModelWeightSchema,
     MultiStateResult,
+    StateSpaceResult,
     ProvenanceBundle,
     ProvenanceItem,
     RealOptionsResult,
@@ -1248,7 +1250,35 @@ def run_full_audit(
         methodology_note=dep_raw.methodology_note,
     )
 
-    # ---- Step 19: Report ----
+    # ---- Step 19: Bayesian state-space model ----
+    ss_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xB5A550FF)
+    ss_params = StateSpaceParams(n_particles=1000)
+    monthly_burn_ss = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
+    total_liq_ss = compute_total_liquidity(financial)
+    runway_ss = total_liq_ss / monthly_burn_ss if monthly_burn_ss > 0 else 12.0
+    ss_raw = run_state_space_analysis(
+        cash_months_runway=runway_ss,
+        burn_acceleration=burn_result.burn_acceleration,
+        enrollment_fraction=milestone_result.enrollment_fraction,
+        biotech_market_score=float(financial.biotech_market_condition_score),
+        rng=ss_rng,
+        params=ss_params,
+    )
+    state_space_result = StateSpaceResult(
+        cash_health_score=ss_raw.cash_health_score,
+        burn_acceleration_signal=ss_raw.burn_acceleration_signal,
+        clinical_progress_signal=ss_raw.clinical_progress_signal,
+        market_condition_signal=ss_raw.market_condition_signal,
+        anomaly_score=ss_raw.anomaly_score,
+        current_state_posterior_mean=list(float(x) for x in ss_raw.current_state_estimate.posterior_mean),
+        current_state_posterior_std=list(float(x) for x in ss_raw.current_state_estimate.posterior_std),
+        predicted_state_posterior_mean=list(float(x) for x in ss_raw.predicted_state_estimate.posterior_mean),
+        effective_sample_size=ss_raw.current_state_estimate.effective_sample_size,
+        interpretation=ss_raw.interpretation,
+        methodology_note=ss_raw.methodology_note,
+    )
+
+    # ---- Step 20: Report ----
     audit_response = AuditResponse(
         company_name=financial.company_name,
         ticker=financial.ticker,
@@ -1274,6 +1304,7 @@ def run_full_audit(
         robustness=robustness_result,
         bma=bma_result,
         dependence=dependence_result,
+        state_space=state_space_result,
         warnings=[
             "This is NOT investment advice.",
             "All model outputs are probabilistic ESTIMATES, not predictions.",

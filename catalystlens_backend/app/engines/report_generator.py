@@ -1031,6 +1031,42 @@ Base cashout probability (independence): **{dep.base_cashout_prob:.1%}**
 
 
 # ---------------------------------------------------------------------------
+# State-space model section
+# ---------------------------------------------------------------------------
+
+def _state_space_section(r: AuditResponse) -> str:
+    ss = r.state_space
+    if ss is None:
+        return ""
+
+    def _bar(score: float, width: int = 20) -> str:
+        filled = int(round(score * width))
+        return "▓" * filled + "░" * (width - filled) + f" {score:.2f}"
+
+    anomaly_note = (
+        f" ⚠ Anomaly score {ss.anomaly_score:.2f} — inputs surprising given prior."
+        if ss.anomaly_score > 0.40 else ""
+    )
+
+    return f"""## BB. Bayesian State-Space Model
+
+Bootstrap particle filter (1000 particles) over latent company health state.{anomaly_note}
+
+| Dimension | Score | Bar |
+|---|---:|---|
+| Cash Health (log runway normalised) | {ss.cash_health_score:.3f} | {_bar(ss.cash_health_score)} |
+| Burn Acceleration (lower = more stress) | {ss.burn_acceleration_signal:.3f} | {_bar(ss.burn_acceleration_signal)} |
+| Clinical Progress (enrollment fraction) | {ss.clinical_progress_signal:.3f} | {_bar(ss.clinical_progress_signal)} |
+| Market Condition | {ss.market_condition_signal:.3f} | {_bar(ss.market_condition_signal)} |
+
+**Effective Sample Size:** {ss.effective_sample_size:.0f} / 1000
+
+**Interpretation:** {ss.interpretation}
+
+*{ss.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
 # Real-options valuation section
 # ---------------------------------------------------------------------------
 
@@ -1188,6 +1224,7 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
         _robustness_section(r),
         _bma_section(r),
         _dependence_section(r),
+        _state_space_section(r),
         _multistate_section(r),
         _assumptions_section(r),
         _provenance_appendix(r),

@@ -484,6 +484,21 @@ class FinalSummaryResult(BaseModel):
     diligence_questions: List[str]
 
 
+class StateSpaceResult(BaseModel):
+    """Bayesian state-space model output from particle filter."""
+    cash_health_score: float = Field(ge=0.0, le=1.0)
+    burn_acceleration_signal: float = Field(ge=0.0, le=1.0)
+    clinical_progress_signal: float = Field(ge=0.0, le=1.0)
+    market_condition_signal: float = Field(ge=0.0, le=1.0)
+    anomaly_score: float = Field(ge=0.0, le=1.0)
+    current_state_posterior_mean: List[float]
+    current_state_posterior_std: List[float]
+    predicted_state_posterior_mean: List[float]
+    effective_sample_size: float
+    interpretation: str
+    methodology_note: str
+
+
 class RobustnessResult(BaseModel):
     """Wasserstein-ball DRO bounds on cashout probability and EV."""
     nominal_cashout_prob: float
@@ -668,6 +683,7 @@ class AuditResponse(BaseModel):
     robustness: Optional[RobustnessResult] = None
     bma: Optional[BMAResult] = None
     dependence: Optional[DependenceAnalysisResult] = None
+    state_space: Optional[StateSpaceResult] = None
     warnings: List[str]
     assumptions: List[str]
     markdown_report: str
