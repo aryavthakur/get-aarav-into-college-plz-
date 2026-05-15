@@ -953,6 +953,84 @@ def _value_of_information_section(r: AuditResponse) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Distributional robustness section
+# ---------------------------------------------------------------------------
+
+def _robustness_section(r: AuditResponse) -> str:
+    rob = r.robustness
+    if rob is None:
+        return ""
+
+    return f"""## Y. Distributional Robustness (Wasserstein DRO)
+
+{rob.robustness_interpretation}
+
+| Wasserstein Epsilon | Worst-Case Cashout Prob | Worst-Case EV |
+|---|---:|---:|
+| ε = 0.05 (minor misspecification) | {rob.worst_case_cashout_prob_e05:.1%} | {_fmt_m(rob.worst_case_ev_e05)} |
+| ε = 0.10 (moderate misspecification) | {rob.worst_case_cashout_prob_e10:.1%} | {_fmt_m(rob.worst_case_ev_e10)} |
+| ε = 0.20 (substantial misspecification) | {rob.worst_case_cashout_prob_e20:.1%} | {_fmt_m(rob.worst_case_ev_e20)} |
+| ε = 0.10 best-case | {rob.best_case_cashout_prob_e10:.1%} | {_fmt_m(rob.best_case_ev_e10)} |
+
+*{rob.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# BMA section
+# ---------------------------------------------------------------------------
+
+def _bma_section(r: AuditResponse) -> str:
+    bma = r.bma
+    if bma is None:
+        return ""
+
+    top_rows = "\n".join(
+        f"| k={mw.k:.2f} | λ={mw.lambda_:.3f} | {mw.posterior_weight:.1%} "
+        f"| {mw.model_cashout_prob:.1%} | {_fmt_m(mw.model_ev)} |"
+        for mw in bma.model_weights[:5]
+    )
+
+    return f"""## Z. Bayesian Model Averaging
+
+BMA-averaged cashout probability: **{bma.bma_cashout_prob:.1%}** (vs nominal from single model).
+BMA-averaged EV: **{_fmt_m(bma.bma_ev)}**
+Effective number of models (posterior entropy): **{bma.effective_n_models:.1f}** of 9 candidates.
+
+### Top-5 Model Weights
+
+| Weibull k | λ (rate) | Posterior Weight | Model Cashout Prob | Model EV |
+|---|---|---:|---:|---:|
+{top_rows}
+
+*{bma.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# Copula dependence section
+# ---------------------------------------------------------------------------
+
+def _dependence_section(r: AuditResponse) -> str:
+    dep = r.dependence
+    if dep is None:
+        return ""
+
+    return f"""## AA. Copula Dependence Analysis
+
+Base cashout probability (independence): **{dep.base_cashout_prob:.1%}**
+
+| Scenario | Rho | Copula Cashout Prob | Effect |
+|---|---:|---:|---:|
+| Enrollment delays ~ financing stress | +0.30 | {dep.positive_rho_cashout_prob:.1%} | {dep.positive_rho_dependence_effect:+.1%} |
+| Clinical progress ~ financing unlock | -0.20 | {dep.negative_rho_cashout_prob:.1%} | {dep.negative_rho_dependence_effect:+.1%} |
+
+**Positive correlation (rho=+0.30):** {dep.positive_rho_interpretation}
+
+**Negative correlation (rho=-0.20):** {dep.negative_rho_interpretation}
+
+*{dep.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
 # Real-options valuation section
 # ---------------------------------------------------------------------------
 
@@ -1107,6 +1185,9 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
         _value_of_information_section(r),
         _real_options_section(r),
         _risk_attribution_section(r),
+        _robustness_section(r),
+        _bma_section(r),
+        _dependence_section(r),
         _multistate_section(r),
         _assumptions_section(r),
         _provenance_appendix(r),

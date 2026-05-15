@@ -66,8 +66,11 @@ from app.engines.solvency import (
     _compute_linear_predictor,
 )
 from app.engines.valuation import run_valuation_simulation
+from app.engines.dependence import run_dependence_analysis
+from app.engines.model_averaging import compute_bma
 from app.engines.real_options import RealOptionsInput, simulate_real_options_value
 from app.engines.risk_attribution import compute_shapley_attribution
+from app.engines.robustness import compute_robustness_bounds
 from app.engines.value_of_information import run_value_of_information_analysis
 from app.models.schemas import (
     AuditRequest,
@@ -80,10 +83,14 @@ from app.models.schemas import (
     FinancingEventInput,
     FinalSummaryResult,
     ModelVersionInfo,
+    BMAResult,
+    DependenceAnalysisResult,
+    ModelWeightSchema,
     MultiStateResult,
     ProvenanceBundle,
     ProvenanceItem,
     RealOptionsResult,
+    RobustnessResult,
     RiskAttributionResult,
     ScenarioResult,
     SensitivityPoint,
@@ -1176,7 +1183,72 @@ def run_full_audit(
         methodology_note=shapley_raw.methodology_note,
     )
 
-    # ---- Step 16: Report ----
+    # ---- Step 16: Distributional robustness ----
+    robustness_raw = compute_robustness_bounds(
+        t_fin=t_fin,
+        t_sci=t_sci,
+        pos_samples=pos_samples,
+        nominal_cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        nominal_ev=val_result.financing_adjusted_rnpv,
+    )
+    robustness_result = RobustnessResult(
+        nominal_cashout_prob=robustness_raw.nominal_cashout_prob,
+        nominal_ev=robustness_raw.nominal_ev,
+        worst_case_cashout_prob_e05=robustness_raw.worst_case_cashout_prob_e05,
+        worst_case_cashout_prob_e10=robustness_raw.worst_case_cashout_prob_e10,
+        worst_case_cashout_prob_e20=robustness_raw.worst_case_cashout_prob_e20,
+        worst_case_ev_e05=robustness_raw.worst_case_ev_e05,
+        worst_case_ev_e10=robustness_raw.worst_case_ev_e10,
+        worst_case_ev_e20=robustness_raw.worst_case_ev_e20,
+        best_case_cashout_prob_e10=robustness_raw.best_case_cashout_prob_e10,
+        best_case_ev_e10=robustness_raw.best_case_ev_e10,
+        robustness_interpretation=robustness_raw.robustness_interpretation,
+        methodology_note=robustness_raw.methodology_note,
+    )
+
+    # ---- Step 17: Bayesian model averaging ----
+    monthly_burn_bma = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
+    total_liq_bma = compute_total_liquidity(financial)
+    simple_runway_bma = total_liq_bma / monthly_burn_bma if monthly_burn_bma > 0 else 12.0
+    bma_raw = compute_bma(
+        simple_runway=simple_runway_bma,
+        risk_multiplier=float(solvency_result.risk_multiplier),
+        base_cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        base_ev=val_result.financing_adjusted_rnpv,
+    )
+    bma_result = BMAResult(
+        bma_cashout_prob=bma_raw.bma_cashout_prob,
+        bma_ev=bma_raw.bma_ev,
+        model_weights=[
+            ModelWeightSchema(
+                k=mw.k, lambda_=mw.lambda_,
+                posterior_weight=mw.posterior_weight,
+                model_cashout_prob=mw.model_cashout_prob,
+                model_ev=mw.model_ev,
+            )
+            for mw in bma_raw.model_weights
+        ],
+        effective_n_models=bma_raw.effective_n_models,
+        highest_weight_model_k=bma_raw.highest_weight_model_k,
+        highest_weight_model_lambda=bma_raw.highest_weight_model_lambda,
+        methodology_note=bma_raw.methodology_note,
+    )
+
+    # ---- Step 18: Copula dependence analysis ----
+    dep_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xFADED000)
+    dep_raw = run_dependence_analysis(t_fin, t_sci, dep_rng)
+    dependence_result = DependenceAnalysisResult(
+        base_cashout_prob=dep_raw.base_cashout_prob,
+        positive_rho_cashout_prob=dep_raw.positive_rho.copula_cashout_prob,
+        positive_rho_dependence_effect=dep_raw.positive_rho.dependence_effect,
+        positive_rho_interpretation=dep_raw.positive_rho.interpretation,
+        negative_rho_cashout_prob=dep_raw.negative_copula_cashout_prob,
+        negative_rho_dependence_effect=dep_raw.negative_dependence_effect,
+        negative_rho_interpretation=dep_raw.negative_interpretation,
+        methodology_note=dep_raw.methodology_note,
+    )
+
+    # ---- Step 19: Report ----
     audit_response = AuditResponse(
         company_name=financial.company_name,
         ticker=financial.ticker,
@@ -1199,6 +1271,9 @@ def run_full_audit(
         value_of_information=voi_result,
         real_options=real_options_result,
         risk_attribution=risk_attribution_result,
+        robustness=robustness_result,
+        bma=bma_result,
+        dependence=dependence_result,
         warnings=[
             "This is NOT investment advice.",
             "All model outputs are probabilistic ESTIMATES, not predictions.",

@@ -484,6 +484,53 @@ class FinalSummaryResult(BaseModel):
     diligence_questions: List[str]
 
 
+class RobustnessResult(BaseModel):
+    """Wasserstein-ball DRO bounds on cashout probability and EV."""
+    nominal_cashout_prob: float
+    nominal_ev: float
+    worst_case_cashout_prob_e05: float
+    worst_case_cashout_prob_e10: float
+    worst_case_cashout_prob_e20: float
+    worst_case_ev_e05: float
+    worst_case_ev_e10: float
+    worst_case_ev_e20: float
+    best_case_cashout_prob_e10: float
+    best_case_ev_e10: float
+    robustness_interpretation: str
+    methodology_note: str
+
+
+class ModelWeightSchema(BaseModel):
+    k: float
+    lambda_: float
+    posterior_weight: float
+    model_cashout_prob: float
+    model_ev: float
+
+
+class BMAResult(BaseModel):
+    """Bayesian model averaging over Weibull model candidates."""
+    bma_cashout_prob: float
+    bma_ev: float
+    model_weights: List[ModelWeightSchema]
+    effective_n_models: float
+    highest_weight_model_k: float
+    highest_weight_model_lambda: float
+    methodology_note: str
+
+
+class DependenceAnalysisResult(BaseModel):
+    """Gaussian copula analysis of T_fin / T_sci rank correlation."""
+    base_cashout_prob: float
+    positive_rho_cashout_prob: float
+    positive_rho_dependence_effect: float
+    positive_rho_interpretation: str
+    negative_rho_cashout_prob: float
+    negative_rho_dependence_effect: float
+    negative_rho_interpretation: str
+    methodology_note: str
+
+
 class RealOptionsResult(BaseModel):
     """Real-options valuation output (compound option on clinical success)."""
     rov_mean: float
@@ -618,6 +665,9 @@ class AuditResponse(BaseModel):
     value_of_information: Optional[ValueOfInformationResult] = None
     real_options: Optional[RealOptionsResult] = None
     risk_attribution: Optional[RiskAttributionResult] = None
+    robustness: Optional[RobustnessResult] = None
+    bma: Optional[BMAResult] = None
+    dependence: Optional[DependenceAnalysisResult] = None
     warnings: List[str]
     assumptions: List[str]
     markdown_report: str
