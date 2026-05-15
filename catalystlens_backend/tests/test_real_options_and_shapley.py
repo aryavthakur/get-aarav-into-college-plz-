@@ -109,6 +109,11 @@ class TestRealOptionsUnit:
         r = self._run()
         assert len(r.model_assumptions) > 0
 
+    def test_real_options_result_preserves_model_inputs(self):
+        r = self._run(sigma=0.80, K=75_000_000, seed=12)
+        assert r.asset_volatility == pytest.approx(0.80)
+        assert r.exercise_cost == pytest.approx(75_000_000)
+
     def test_reproducible(self):
         r1 = self._run(seed=99)
         r2 = self._run(seed=99)
@@ -217,6 +222,11 @@ class TestRealOptionsShapleyIntegration:
         r = run_full_audit(self._request())
         assert r.real_options.rov_mean >= 0.0
 
+    def test_audit_uses_phase_aware_real_options_exercise_cost(self):
+        r = run_full_audit(self._request())
+        assert r.real_options.exercise_cost > 0.0
+        assert "phase-aware" in " ".join(r.real_options.model_assumptions).lower()
+
     def test_risk_attribution_populated(self):
         r = run_full_audit(self._request())
         assert r.risk_attribution is not None
@@ -228,6 +238,7 @@ class TestRealOptionsShapleyIntegration:
     def test_report_includes_real_options_section(self):
         r = run_full_audit(self._request())
         assert "Real-Options Valuation" in r.markdown_report
+        assert f"sigma={r.real_options.asset_volatility:.0%}" in r.markdown_report
 
     def test_report_includes_shapley_section(self):
         r = run_full_audit(self._request())

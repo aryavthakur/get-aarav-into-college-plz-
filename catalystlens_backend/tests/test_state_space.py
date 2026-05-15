@@ -160,3 +160,10 @@ class TestStateSpaceIntegration:
     def test_state_space_report_section(self):
         r = run_full_audit(self._request())
         assert "State-Space Model" in r.markdown_report
+
+    def test_state_space_methodology_discloses_single_snapshot(self):
+        r = run_full_audit(self._request())
+        note = r.state_space.methodology_note.lower()
+        report = r.markdown_report.lower()
+        assert "single-snapshot" in note
+        assert "not a fully dynamic historical filter" in report

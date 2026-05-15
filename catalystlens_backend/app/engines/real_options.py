@@ -50,6 +50,8 @@ class RealOptionsResult:
     real_options_premium_pct: float
     abandonment_value: float
     financing_adjusted_rov: float
+    exercise_cost: float
+    asset_volatility: float
     model_assumptions: list[str]
     method_status: str = "experimental_scaffold"
 
@@ -156,9 +158,11 @@ def simulate_real_options_value(
         ),
         abandonment_value=round(abandonment_savings, 2),
         financing_adjusted_rov=round(financing_adjusted_rov, 2),
+        exercise_cost=round(K, 2),
+        asset_volatility=round(float(sigma), 4),
         model_assumptions=[
             f"GBM underlying: sigma={sigma:.0%}, r={r:.0%}.",
-            "Exercise cost K defaults to 0 (pure upside option); set to next-phase investment for compound option.",
+            f"Exercise cost K={K:,.0f}; use phase-aware next-stage investment for compound option interpretation.",
             "Real-options premium = ROV - max(rNPV, 0); positive when volatility adds value beyond rNPV.",
             "Technical PoS applied as probability weight, not binary event, to smooth the payoff surface.",
             "Financing-adjusted ROV applies uncalibrated financing-state dilution/retained-economics assumptions.",

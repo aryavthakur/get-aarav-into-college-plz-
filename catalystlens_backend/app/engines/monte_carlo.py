@@ -1141,10 +1141,26 @@ def run_full_audit(
     )
 
     # ---- Step 14: Real-options valuation ----
+    def _phase_aware_exercise_cost(phase: str, asset_value_success: float) -> float:
+        # MVP defaults for next-stage investment required to exercise the development option.
+        phase_costs = {
+            "preclinical": 25_000_000.0,
+            "phase_1": 50_000_000.0,
+            "phase_2": 150_000_000.0,
+            "phase_3": 75_000_000.0,
+            "filed": 25_000_000.0,
+            "approved": 0.0,
+        }
+        return min(phase_costs.get(phase, 75_000_000.0), max(asset_value_success * 0.75, 0.0))
+
     ro_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xDEADBEEF)
+    ro_exercise_cost = _phase_aware_exercise_cost(
+        clinical.trial_phase,
+        float(valuation.asset_value_success),
+    )
     ro_input = RealOptionsInput(
         asset_value_success=float(valuation.asset_value_success),
-        exercise_cost=0.0,
+        exercise_cost=ro_exercise_cost,
         asset_volatility=0.60,
         annual_discount_rate=float(valuation.annual_discount_rate),
         pos_mean=float(pos_result.posterior_mean),
@@ -1168,6 +1184,8 @@ def run_full_audit(
         real_options_premium_pct=ro_raw.real_options_premium_pct,
         abandonment_value=ro_raw.abandonment_value,
         financing_adjusted_rov=ro_raw.financing_adjusted_rov,
+        exercise_cost=ro_raw.exercise_cost,
+        asset_volatility=ro_raw.asset_volatility,
         model_assumptions=ro_raw.model_assumptions,
         method_status=ro_raw.method_status,
     )
