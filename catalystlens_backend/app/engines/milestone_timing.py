@@ -133,9 +133,15 @@ def estimate_gamma_parameters(
     delay_factor = _compute_delay_factor(clinical, params)
     cv = _compute_cv(clinical, params)
 
-    # Adjusted mean, but floor at enrollment_remaining * buffer
+    # Adjusted mean, but floor at decomposed public-readout path.
     enroll_remaining = _enrollment_remaining_months(clinical)
-    min_months = enroll_remaining * params.min_enrollment_remaining_buffer
+    public_readout_lag = (
+        clinical.followup_months_after_enrollment
+        + clinical.data_cleaning_months
+        + clinical.analysis_months
+        + clinical.disclosure_lag_months
+    )
+    min_months = enroll_remaining + public_readout_lag
     stated_adjusted = clinical.stated_months_to_catalyst * delay_factor
     adjusted_mean = max(stated_adjusted, min_months, 1.0)
 
@@ -191,6 +197,13 @@ def run_milestone_timing_analysis(
     delay_factor = _compute_delay_factor(clinical, config.milestone_timing)
     enroll_remaining = _enrollment_remaining_months(clinical)
     enrollment_fraction = clinical.enrollment_completed / clinical.enrollment_target
+    primary_completion_months = enroll_remaining + clinical.followup_months_after_enrollment
+    public_readout_lag = (
+        clinical.data_cleaning_months
+        + clinical.analysis_months
+        + clinical.disclosure_lag_months
+    )
+    public_readout_months = primary_completion_months + public_readout_lag
 
     rng = np.random.default_rng(seed)
     samples = sample_scientific_milestone_time(rng, alpha, beta_rate, n_quantile_samples)
@@ -204,6 +217,14 @@ def run_milestone_timing_analysis(
         cv=round(cv, 4),
         enrollment_fraction=round(enrollment_fraction, 4),
         enrollment_remaining_months=round(enroll_remaining, 2),
+        enrollment_component_months=round(enroll_remaining, 2),
+        followup_component_months=round(clinical.followup_months_after_enrollment, 2),
+        data_cleaning_component_months=round(clinical.data_cleaning_months, 2),
+        analysis_component_months=round(clinical.analysis_months, 2),
+        disclosure_lag_months=round(clinical.disclosure_lag_months, 2),
+        primary_completion_months=round(primary_completion_months, 2),
+        public_readout_lag_months=round(public_readout_lag, 2),
+        public_readout_months=round(public_readout_months, 2),
         p5_months=round(float(np.percentile(samples, 5)), 2),
         p25_months=round(float(np.percentile(samples, 25)), 2),
         p50_months=round(float(np.percentile(samples, 50)), 2),
@@ -214,6 +235,7 @@ def run_milestone_timing_analysis(
             "Stated catalyst timing treated as management estimate subject to optimism bias.",
             f"Base delay factor: {config.milestone_timing.base_delay_factor}x stated timeline.",
             "Minimum timeline floored at enrollment_remaining * buffer to prevent impossible catalysts.",
+            "Primary completion and public readout are modeled as separate timing concepts.",
             "CV is phase-anchored and increases with indication/endpoint/regulatory complexity.",
         ],
     )
