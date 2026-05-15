@@ -47,6 +47,15 @@ from app.engines.milestone_timing import (
     sample_scientific_milestone_time,
 )
 from app.engines.report_generator import generate_full_report
+from app.engines.multistate import (
+    CAUSE_NAMES,
+    CAUSE_TO_VALUATION_STATE,
+    DEFAULT_CAUSE_SCALES,
+    build_cause_lp,
+    cif_at_time,
+    compute_overall_survival,
+    sample_competing_risk,
+)
 from app.engines.solvency import (
     calculate_monthly_burn,
     calculate_risk_multiplier,
@@ -57,6 +66,13 @@ from app.engines.solvency import (
     _compute_linear_predictor,
 )
 from app.engines.valuation import run_valuation_simulation
+from app.engines.dependence import run_dependence_analysis
+from app.engines.state_space import StateSpaceParams, run_state_space_analysis
+from app.engines.model_averaging import compute_bma
+from app.engines.real_options import RealOptionsInput, simulate_real_options_value
+from app.engines.risk_attribution import compute_shapley_attribution
+from app.engines.robustness import compute_robustness_bounds
+from app.engines.value_of_information import run_value_of_information_analysis
 from app.models.schemas import (
     AuditRequest,
     AuditResponse,
@@ -68,14 +84,25 @@ from app.models.schemas import (
     FinancingEventInput,
     FinalSummaryResult,
     ModelVersionInfo,
+    BMAResult,
+    DependenceAnalysisResult,
+    ModelWeightSchema,
+    MultiStateResult,
+    StateSpaceResult,
     ProvenanceBundle,
     ProvenanceItem,
+    RealOptionsResult,
+    RobustnessResult,
+    RiskAttributionResult,
     ScenarioResult,
     SensitivityPoint,
+    ShapleyComponentSchema,
+    SignalEVSISchema,
     SimulationConfig,
     SuccessProbabilityInput,
     ValuationInput,
     ValidationSnapshot,
+    ValueOfInformationResult,
 )
 
 
@@ -169,6 +196,7 @@ def apply_cash_path_cap(
     sim_cfg: SimulationConfig,
     rng: np.random.Generator,
     planned_financing_events: list[FinancingEventInput] | None = None,
+    catalyst_month: float | None = None,
 ) -> tuple[np.ndarray, CashPathResult]:
     """Apply mechanical cash exhaustion as an upper bound on financial survival samples."""
     cash_path = simulate_cash_path(
@@ -177,6 +205,7 @@ def apply_cash_path_cap(
             monthly_burn=calculate_monthly_burn(financial.quarterly_operating_cash_burn),
             horizon_months=sim_cfg.monthly_horizon,
             financing_events=planned_financing_events or financial.planned_financing_events,
+            catalyst_month=catalyst_month,
         ),
         rng=rng,
     )
@@ -266,15 +295,20 @@ def _run_core_simulation(
     config: CatalystLensConfig,
     pos_alpha_override: Optional[float] = None,
     pos_beta_override: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    min_sci_months: float = 0.1,
+    use_multistate: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Run vectorised simulation core.
 
     pos_alpha_override / pos_beta_override allow the sensitivity engine to inject
-    modified Beta parameters without re-running the full signal update pipeline,
-    ensuring that PoS sensitivity actually changes the sampled success probabilities.
+    modified Beta parameters without re-running the full signal update pipeline.
+    min_sci_months floors t_sci samples at the minimum feasible public readout
+    timeline (enrollment + follow-up + cleaning + analysis + disclosure lag).
 
-    Returns: (t_fin_samples, t_sci_samples, pos_samples)
+    use_multistate=False (default): returns (t_fin, t_sci, pos) — backwards compatible.
+    use_multistate=True: returns (t_fin, t_sci, pos, cause_array) where cause_array
+      is shape (n,) with integer cause IDs 1–7.
     """
     wp = config.weibull_params
     monthly_burn = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
@@ -300,22 +334,27 @@ def _run_core_simulation(
     if pos_alpha_override is not None and pos_beta_override is not None:
         alpha_post, beta_post = pos_alpha_override, pos_beta_override
     else:
-        alpha_pr, beta_pr = build_success_prior_by_phase(
-            pos_input.trial_phase, config,
-            pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
-        )
-        alpha_post, beta_post, _, _ = update_beta_posterior(
-            alpha_pr, beta_pr,
-            pos_input.positive_signals, pos_input.negative_signals, config,
-        )
+        # Use the same hierarchical prior path as run_success_probability_analysis so that
+        # the posterior used in valuation exactly matches what the report displays.
+        _pos_result = run_success_probability_analysis(pos_input, config)
+        alpha_post = _pos_result.alpha_posterior
+        beta_post = _pos_result.beta_posterior
 
     gamma_alpha, gamma_beta_rate, _, _ = estimate_gamma_parameters(clinical, config)
 
-    t_fin = sample_financial_failure_time(rng, rm, wp, n)
-    t_sci = sample_scientific_milestone_time(rng, gamma_alpha, gamma_beta_rate, n)
+    t_sci = sample_scientific_milestone_time(rng, gamma_alpha, gamma_beta_rate, n, min_months=min_sci_months)
     pos = sample_success_probability(rng, alpha_post, beta_post, n)
 
-    return t_fin, t_sci, pos
+    if use_multistate:
+        # Build cause-specific linear predictors from the aggregate LP
+        cause_lp = build_cause_lp(lp, list(DEFAULT_CAUSE_SCALES.keys()))
+        samples = sample_competing_risk(DEFAULT_CAUSE_SCALES, cause_lp, rng, n)
+        t_fin = samples[:, 0]
+        cause_array = samples[:, 1].astype(np.int32)
+        return t_fin, t_sci, pos, cause_array
+    else:
+        t_fin = sample_financial_failure_time(rng, rm, wp, n)
+        return t_fin, t_sci, pos
 
 
 def _scenario_label_for_ev(ev: float, base_ev: float) -> str:
@@ -428,21 +467,39 @@ def _run_sensitivity(
     rng: np.random.Generator,
     config: CatalystLensConfig,
     sim_cfg: SimulationConfig,
+    var_seed: int = 0,
 ) -> SensitivityPoint:
-    """Compute sensitivity of cashout probability and EV to one variable."""
+    """
+    Compute sensitivity of cashout probability and EV to one variable.
+
+    Common Random Numbers (CRN): all three levels (low/base/high) use the same
+    underlying random draws so directional comparisons are not confounded by
+    Monte Carlo noise. Each variable gets its own independent seeded sub-stream.
+    """
+    # Spawn a fresh, deterministic RNG for this variable — independent from the
+    # shared simulation rng so callers remain reproducible.
+    var_rng = np.random.default_rng(var_seed)
 
     def _sim(fin: CompanyFinancialInput, clin: ClinicalCatalystInput,
-             val: ValuationInput, ba: float) -> Tuple[float, float]:
+             val: ValuationInput, ba: float,
+             pos_alpha_override: Optional[float] = None,
+             pos_beta_override: Optional[float] = None) -> Tuple[float, float]:
+        # Save and restore RNG state so every level uses the same random draws (CRN).
+        saved_state = var_rng.bit_generator.state
         t_fin, t_sci, pos = _run_core_simulation(
-            fin, clin, pos_input, val, ba, n, rng, config
+            fin, clin, pos_input, val, ba, n, var_rng, config,
+            pos_alpha_override=pos_alpha_override,
+            pos_beta_override=pos_beta_override,
         )
-        t_fin, _ = apply_cash_path_cap(t_fin, fin, sim_cfg, rng)
+        t_fin, _ = apply_cash_path_cap(t_fin, fin, sim_cfg, var_rng)
         ctc = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
         val_r = run_valuation_simulation(
-            t_sci, t_fin, pos, val, rng,
+            t_sci, t_fin, pos, val, var_rng,
             market_condition_score=float(fin.biotech_market_condition_score),
             config=config,
         )
+        # Restore so the next level starts from the same draws.
+        var_rng.bit_generator.state = saved_state
         return ctc.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv
 
     field = variable_def["field"]
@@ -486,13 +543,10 @@ def _run_sensitivity(
             lbl = f"{mult:.0%} enroll rate"
 
         elif field == "pos_delta_mult":
-            a_pr, b_pr = build_success_prior_by_phase(
-                pos_input.trial_phase, config,
-                pos_input.custom_alpha_prior, pos_input.custom_beta_prior,
-            )
-            a_po, b_po, _, _ = update_beta_posterior(
-                a_pr, b_pr, pos_input.positive_signals, pos_input.negative_signals, config
-            )
+            # Use hierarchical posterior (same path as run_success_probability_analysis).
+            _base_pos_result = run_success_probability_analysis(pos_input, config)
+            a_po = _base_pos_result.alpha_posterior
+            b_po = _base_pos_result.beta_posterior
             base_pos = a_po / (a_po + b_po)
             total_concentration = a_po + b_po
             mult = variable_def.get("low_mult" if level == "low" else "high_mult", 1.0)
@@ -503,19 +557,9 @@ def _run_sensitivity(
             new_alpha = new_pos_mean * total_concentration
             new_beta = (1.0 - new_pos_mean) * total_concentration
             lbl = f"{new_pos_mean:.0%} PoS"
-            # Run real simulation with overridden PoS parameters
-            t_f, t_s, pos_s = _run_core_simulation(
-                fin_mod, clin_mod, pos_input, val_mod, ba_mod, n,
-                rng, config, pos_alpha_override=new_alpha, pos_beta_override=new_beta,
-            )
-            t_f, _ = apply_cash_path_cap(t_f, fin_mod, sim_cfg, rng)
-            ctc_r = run_capital_to_catalyst_analysis(t_s, t_f, config)
-            val_r = run_valuation_simulation(
-                t_s, t_f, pos_s, val_mod, rng,
-                market_condition_score=float(fin_mod.biotech_market_condition_score),
-                config=config,
-            )
-            results.append((ctc_r.probability_cashout_before_catalyst, val_r.financing_adjusted_rnpv))
+            cp, ev = _sim(fin_mod, clin_mod, val_mod, ba_mod,
+                          pos_alpha_override=new_alpha, pos_beta_override=new_beta)
+            results.append((cp, ev))
             if level == "low":
                 low_label = lbl
             elif level == "base":
@@ -756,6 +800,13 @@ def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
     else:
         quality_label = "low"
 
+    # Evidence quality is separate from completeness.
+    # Manual inputs can be 100% complete but still have low evidence quality.
+    # Source-traced provenance (SEC, ClinicalTrials.gov) raises evidence quality.
+    # For now, all inputs are manual; source ETL integration will upgrade this.
+    evidence_quality: str = "low"
+    evidence_note = "All inputs are manual; no SEC/ClinicalTrials.gov source tracing applied."
+
     return DataQualityResult(
         financial_data_completeness=round(fin_score, 2),
         clinical_data_completeness=round(clin_score, 2),
@@ -763,6 +814,8 @@ def _compute_data_quality(request: AuditRequest) -> DataQualityResult:
         overall_completeness=round(overall, 2),
         primary_limitations=limitations,
         data_quality_score=quality_label,
+        evidence_quality_score=evidence_quality,
+        evidence_quality_note=evidence_note,
     )
 
 
@@ -906,11 +959,25 @@ def run_full_audit(
     disclosure_result = run_disclosure_consistency_analysis(disclosure, config)
 
     # ---- Step 6: Monte Carlo core simulation ----
-    t_fin, t_sci, pos_samples = _run_core_simulation(
-        financial, clinical, pos_input, valuation,
-        burn_result.burn_acceleration, n, streams.financing, config,
+    use_ms = sim_cfg.use_multistate
+    if use_ms:
+        t_fin, t_sci, pos_samples, cause_array = _run_core_simulation(
+            financial, clinical, pos_input, valuation,
+            burn_result.burn_acceleration, n, streams.financing, config,
+            min_sci_months=milestone_result.public_readout_months,
+            use_multistate=True,
+        )
+    else:
+        t_fin, t_sci, pos_samples = _run_core_simulation(
+            financial, clinical, pos_input, valuation,
+            burn_result.burn_acceleration, n, streams.financing, config,
+            min_sci_months=milestone_result.public_readout_months,
+        )
+        cause_array = None
+    t_fin, cash_path_result = apply_cash_path_cap(
+        t_fin, financial, sim_cfg, streams.cash,
+        catalyst_month=milestone_result.public_readout_months,
     )
-    t_fin, cash_path_result = apply_cash_path_cap(t_fin, financial, sim_cfg, streams.cash)
 
     # ---- Step 7: Capital-to-catalyst ----
     ctc_result = run_capital_to_catalyst_analysis(t_sci, t_fin, config)
@@ -937,11 +1004,13 @@ def run_full_audit(
     n_sens = config.sensitivity_n_simulations
     base_cashout = ctc_result.probability_cashout_before_catalyst
     sensitivity: List[SensitivityPoint] = []
-    for var_def in _SENSITIVITY_VARS:
+    for var_idx, var_def in enumerate(_SENSITIVITY_VARS):
+        # Each variable gets a unique, reproducible seed for CRN across low/base/high levels.
+        var_seed = sim_cfg.random_seed ^ (var_idx * 0x9E3779B9 & 0xFFFFFFFF)
         sp = _run_sensitivity(
             var_def, financial, clinical, pos_input, valuation,
             burn_result.burn_acceleration, base_cashout, base_ev,
-            n_sens, rng, config, sim_cfg,
+            n_sens, rng, config, sim_cfg, var_seed=var_seed,
         )
         sensitivity.append(sp)
 
@@ -987,7 +1056,229 @@ def run_full_audit(
         diligence_questions=diligence_questions,
     )
 
-    # ---- Step 12: Report ----
+    # ---- Step 12: Multi-state result (optional) ----
+    multi_state_result: MultiStateResult | None = None
+    if use_ms and cause_array is not None:
+        # Compute aggregate LP for CIF
+        monthly_burn_ms = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
+        total_liq_ms = compute_total_liquidity(financial)
+        _lp_val, _ = _compute_linear_predictor(
+            monthly_burn=monthly_burn_ms,
+            total_liquidity=total_liq_ms,
+            burn_acceleration=burn_result.burn_acceleration,
+            market_cap=financial.market_cap,
+            debt=financial.debt,
+            going_concern_flag=financial.going_concern_flag,
+            recent_financing_flag=financial.recent_financing_flag,
+            months_since_last_raise=financial.months_since_last_raise,
+            biotech_market_condition_score=financial.biotech_market_condition_score,
+            pipeline_concentration_score=financial.pipeline_concentration_score,
+            trial_phase=clinical.trial_phase,
+            coeff=config.cox_coefficients,
+            phase_risk_map=config.trial_phase_risk_map,
+        )
+        cause_lp_ms = build_cause_lp(_lp_val, list(DEFAULT_CAUSE_SCALES.keys()))
+        # Absorbing state probabilities from simulation
+        absorbed_mask = t_fin <= sim_cfg.monthly_horizon
+        absorbed_causes = cause_array[absorbed_mask]
+        abs_probs: dict[str, float] = {}
+        for cid, name in CAUSE_NAMES.items():
+            abs_probs[name] = round(float(np.sum(absorbed_causes == cid)) / n, 4)
+        still_operating = round(float(np.sum(~absorbed_mask)) / n, 4)
+        # Median transition time
+        absorbed_times = t_fin[absorbed_mask]
+        median_t = float(np.median(absorbed_times)) if len(absorbed_times) > 0 else None
+        # CIF at catalyst month
+        cat_month = milestone_result.public_readout_months
+        cif_cat = cif_at_time(cat_month, DEFAULT_CAUSE_SCALES, cause_lp_ms)
+        cif_cat_named = {CAUSE_NAMES[cid]: round(v, 4) for cid, v in cif_cat.items()}
+        s_cat = float(compute_overall_survival(
+            np.array([cat_month]), DEFAULT_CAUSE_SCALES, cause_lp_ms
+        )[0])
+        multi_state_result = MultiStateResult(
+            absorbing_state_probs=abs_probs,
+            overall_survival_at_horizon=still_operating,
+            median_transition_time=round(median_t, 1) if median_t else None,
+            cif_at_catalyst_month=cif_cat_named,
+            overall_survival_at_catalyst_month=round(s_cat, 4),
+            model_assumptions=[
+                "Multi-state competing-risk Weibull model with 7 absorbing causes.",
+                "Cause LPs derived from aggregate Cox LP via differential weighting.",
+                "Scale parameters are MVP defaults; not fit to historical outcome data.",
+            ],
+        )
+
+    # ---- Step 13: Value of Information ----
+    voi_raw = run_value_of_information_analysis(
+        alpha_posterior=pos_result.alpha_posterior,
+        beta_posterior=pos_result.beta_posterior,
+        financing_adjusted_rnpv=val_result.financing_adjusted_rnpv,
+    )
+    voi_result = ValueOfInformationResult(
+        evpi_dollars=voi_raw.evpi_dollars,
+        evpi_pct_of_ev=voi_raw.evpi_pct_of_ev,
+        evpi_interpretation=voi_raw.evpi_interpretation,
+        per_signal_evsi=[
+            SignalEVSISchema(
+                signal_name=s.signal_name,
+                description=s.description,
+                category=s.category,
+                signal_weight=s.signal_weight,
+                evsi_dollars=s.evsi_dollars,
+                ev_if_positive=s.ev_if_positive,
+                ev_if_negative=s.ev_if_negative,
+                p_positive=s.p_positive,
+            )
+            for s in voi_raw.per_signal_evsi
+        ],
+        top_diligence_priority=voi_raw.top_diligence_priority,
+        total_observable_evsi=voi_raw.total_observable_evsi,
+        methodology_note=voi_raw.methodology_note,
+    )
+
+    # ---- Step 14: Real-options valuation ----
+    ro_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xDEADBEEF)
+    ro_input = RealOptionsInput(
+        asset_value_success=float(valuation.asset_value_success),
+        exercise_cost=0.0,
+        asset_volatility=0.60,
+        annual_discount_rate=float(valuation.annual_discount_rate),
+        pos_mean=float(pos_result.posterior_mean),
+    )
+    ro_raw = simulate_real_options_value(t_sci, pos_samples, ro_input, ro_rng)
+    real_options_result = RealOptionsResult(
+        rov_mean=ro_raw.rov_mean,
+        rov_median=ro_raw.rov_median,
+        rov_p5=ro_raw.rov_p5,
+        rov_p95=ro_raw.rov_p95,
+        rnpv_static=ro_raw.rnpv_static,
+        real_options_premium=ro_raw.real_options_premium,
+        real_options_premium_pct=ro_raw.real_options_premium_pct,
+        abandonment_value=ro_raw.abandonment_value,
+        model_assumptions=ro_raw.model_assumptions,
+    )
+
+    # ---- Step 15: Shapley risk attribution ----
+    shapley_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xCAFE0001)
+    shapley_raw = compute_shapley_attribution(
+        sensitivity_rows=sensitivity,
+        total_cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        total_ev=val_result.financing_adjusted_rnpv,
+        n_permutations=64,
+        rng=shapley_rng,
+    )
+    risk_attribution_result = RiskAttributionResult(
+        components=[
+            ShapleyComponentSchema(
+                driver=c.driver,
+                description=c.description,
+                cashout_prob_shapley=c.cashout_prob_shapley,
+                ev_shapley=c.ev_shapley,
+                rank=c.rank,
+            )
+            for c in shapley_raw.components
+        ],
+        total_cashout_prob=shapley_raw.total_cashout_prob,
+        total_ev=shapley_raw.total_ev,
+        explained_cashout_prob=shapley_raw.explained_cashout_prob,
+        explained_ev=shapley_raw.explained_ev,
+        methodology_note=shapley_raw.methodology_note,
+    )
+
+    # ---- Step 16: Distributional robustness ----
+    robustness_raw = compute_robustness_bounds(
+        t_fin=t_fin,
+        t_sci=t_sci,
+        pos_samples=pos_samples,
+        nominal_cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        nominal_ev=val_result.financing_adjusted_rnpv,
+    )
+    robustness_result = RobustnessResult(
+        nominal_cashout_prob=robustness_raw.nominal_cashout_prob,
+        nominal_ev=robustness_raw.nominal_ev,
+        worst_case_cashout_prob_e05=robustness_raw.worst_case_cashout_prob_e05,
+        worst_case_cashout_prob_e10=robustness_raw.worst_case_cashout_prob_e10,
+        worst_case_cashout_prob_e20=robustness_raw.worst_case_cashout_prob_e20,
+        worst_case_ev_e05=robustness_raw.worst_case_ev_e05,
+        worst_case_ev_e10=robustness_raw.worst_case_ev_e10,
+        worst_case_ev_e20=robustness_raw.worst_case_ev_e20,
+        best_case_cashout_prob_e10=robustness_raw.best_case_cashout_prob_e10,
+        best_case_ev_e10=robustness_raw.best_case_ev_e10,
+        robustness_interpretation=robustness_raw.robustness_interpretation,
+        methodology_note=robustness_raw.methodology_note,
+    )
+
+    # ---- Step 17: Bayesian model averaging ----
+    monthly_burn_bma = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
+    total_liq_bma = compute_total_liquidity(financial)
+    simple_runway_bma = total_liq_bma / monthly_burn_bma if monthly_burn_bma > 0 else 12.0
+    bma_raw = compute_bma(
+        simple_runway=simple_runway_bma,
+        risk_multiplier=float(solvency_result.risk_multiplier),
+        base_cashout_prob=ctc_result.probability_cashout_before_catalyst,
+        base_ev=val_result.financing_adjusted_rnpv,
+    )
+    bma_result = BMAResult(
+        bma_cashout_prob=bma_raw.bma_cashout_prob,
+        bma_ev=bma_raw.bma_ev,
+        model_weights=[
+            ModelWeightSchema(
+                k=mw.k, lambda_=mw.lambda_,
+                posterior_weight=mw.posterior_weight,
+                model_cashout_prob=mw.model_cashout_prob,
+                model_ev=mw.model_ev,
+            )
+            for mw in bma_raw.model_weights
+        ],
+        effective_n_models=bma_raw.effective_n_models,
+        highest_weight_model_k=bma_raw.highest_weight_model_k,
+        highest_weight_model_lambda=bma_raw.highest_weight_model_lambda,
+        methodology_note=bma_raw.methodology_note,
+    )
+
+    # ---- Step 18: Copula dependence analysis ----
+    dep_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xFADED000)
+    dep_raw = run_dependence_analysis(t_fin, t_sci, dep_rng)
+    dependence_result = DependenceAnalysisResult(
+        base_cashout_prob=dep_raw.base_cashout_prob,
+        positive_rho_cashout_prob=dep_raw.positive_rho.copula_cashout_prob,
+        positive_rho_dependence_effect=dep_raw.positive_rho.dependence_effect,
+        positive_rho_interpretation=dep_raw.positive_rho.interpretation,
+        negative_rho_cashout_prob=dep_raw.negative_copula_cashout_prob,
+        negative_rho_dependence_effect=dep_raw.negative_dependence_effect,
+        negative_rho_interpretation=dep_raw.negative_interpretation,
+        methodology_note=dep_raw.methodology_note,
+    )
+
+    # ---- Step 19: Bayesian state-space model ----
+    ss_rng = np.random.default_rng(sim_cfg.random_seed ^ 0xB5A550FF)
+    ss_params = StateSpaceParams(n_particles=1000)
+    monthly_burn_ss = calculate_monthly_burn(financial.quarterly_operating_cash_burn)
+    total_liq_ss = compute_total_liquidity(financial)
+    runway_ss = total_liq_ss / monthly_burn_ss if monthly_burn_ss > 0 else 12.0
+    ss_raw = run_state_space_analysis(
+        cash_months_runway=runway_ss,
+        burn_acceleration=burn_result.burn_acceleration,
+        enrollment_fraction=milestone_result.enrollment_fraction,
+        biotech_market_score=float(financial.biotech_market_condition_score),
+        rng=ss_rng,
+        params=ss_params,
+    )
+    state_space_result = StateSpaceResult(
+        cash_health_score=ss_raw.cash_health_score,
+        burn_acceleration_signal=ss_raw.burn_acceleration_signal,
+        clinical_progress_signal=ss_raw.clinical_progress_signal,
+        market_condition_signal=ss_raw.market_condition_signal,
+        anomaly_score=ss_raw.anomaly_score,
+        current_state_posterior_mean=list(float(x) for x in ss_raw.current_state_estimate.posterior_mean),
+        current_state_posterior_std=list(float(x) for x in ss_raw.current_state_estimate.posterior_std),
+        predicted_state_posterior_mean=list(float(x) for x in ss_raw.predicted_state_estimate.posterior_mean),
+        effective_sample_size=ss_raw.current_state_estimate.effective_sample_size,
+        interpretation=ss_raw.interpretation,
+        methodology_note=ss_raw.methodology_note,
+    )
+
+    # ---- Step 20: Report ----
     audit_response = AuditResponse(
         company_name=financial.company_name,
         ticker=financial.ticker,
@@ -1006,6 +1297,14 @@ def run_full_audit(
         burn_regime=burn_result,
         disclosure_consistency=disclosure_result,
         final_summary=final_summary,
+        multi_state=multi_state_result,
+        value_of_information=voi_result,
+        real_options=real_options_result,
+        risk_attribution=risk_attribution_result,
+        robustness=robustness_result,
+        bma=bma_result,
+        dependence=dependence_result,
+        state_space=state_space_result,
         warnings=[
             "This is NOT investment advice.",
             "All model outputs are probabilistic ESTIMATES, not predictions.",

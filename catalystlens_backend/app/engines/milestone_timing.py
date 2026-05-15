@@ -181,14 +181,16 @@ def sample_scientific_milestone_time(
     alpha: float,
     beta_rate: float,
     n_samples: int,
+    min_months: float = 0.1,
 ) -> np.ndarray:
     """
     Sample milestone times from Gamma(alpha, scale=1/beta_rate).
 
-    Returns array of positive timing samples in months.
+    Samples are floored at min_months to enforce the minimum feasible public
+    readout timeline (enrollment + follow-up + cleaning + analysis + disclosure lag).
     """
     samples = rng.gamma(shape=alpha, scale=1.0 / beta_rate, size=n_samples)
-    return np.maximum(samples, 0.1)
+    return np.maximum(samples, max(min_months, 0.1))
 
 
 def run_milestone_timing_analysis(
@@ -214,7 +216,9 @@ def run_milestone_timing_analysis(
     public_readout_months = primary_completion_months + public_readout_lag
 
     rng = np.random.default_rng(seed)
-    samples = sample_scientific_milestone_time(rng, alpha, beta_rate, n_quantile_samples)
+    samples = sample_scientific_milestone_time(
+        rng, alpha, beta_rate, n_quantile_samples, min_months=public_readout_months
+    )
 
     return MilestoneTimingResult(
         gamma_alpha=round(alpha, 4),

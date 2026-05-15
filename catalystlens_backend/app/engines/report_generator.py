@@ -359,12 +359,30 @@ def _bayesian_pos_section(r: AuditResponse, req: AuditRequest) -> str:
     delta_pos = pos.posterior_mean - pos.prior_mean
     delta_direction = "upward" if delta_pos > 0 else "downward"
 
+    prior_src = getattr(pos, "prior_source", "mvp_phase_prior")
+    prior_conf = getattr(pos, "prior_confidence", 0.35)
+    prior_fb = getattr(pos, "prior_fallback_level", "phase_only")
+    disease_area = getattr(req.success_probability, "disease_area", None) or "—"
+    modality = getattr(req.success_probability, "modality", None) or "—"
+    endpoint_family = getattr(req.success_probability, "endpoint_family", None) or "—"
+
     return f"""## F. Bayesian Probability of Technical Success
 
-The model begins with a phase-specific Beta distribution prior encoding the
-historical industry-wide probability of technical success from the stated
-development stage to regulatory approval. It then updates this prior using
-weighted trial-specific evidence signals.
+The model begins with a Beta distribution prior encoding the industry-wide
+probability of technical success. It uses a hierarchical lookup (phase → disease area
+→ modality → endpoint family) when strata are supplied; otherwise falls back to the
+phase-only MVP prior. It then updates this prior using weighted trial-specific signals.
+
+### Prior Metadata
+
+| Field | Value |
+|---|---|
+| Prior Source | `{prior_src}` |
+| Prior Confidence | {prior_conf:.0%} |
+| Fallback Level | `{prior_fb}` |
+| Disease Area | {disease_area} |
+| Modality | {modality} |
+| Endpoint Family | {endpoint_family} |
 
 ### Positive Evidence Signals
 
@@ -382,7 +400,7 @@ weighted trial-specific evidence signals.
 
 | Metric | Value |
 |---|---:|
-| Phase-Specific Prior | Beta({pos.alpha_prior:.1f}, {pos.beta_prior:.1f}) |
+| Prior Distribution | Beta({pos.alpha_prior:.1f}, {pos.beta_prior:.1f}) |
 | Prior Mean PoS | {_fmt_pct(pos.prior_mean)} |
 | Evidence Update | +{sum(pos.applied_positive_weights.values()):.2f} to α, +{sum(pos.applied_negative_weights.values()):.2f} to β |
 | Posterior Distribution | Beta({pos.alpha_posterior:.1f}, {pos.beta_posterior:.1f}) |
@@ -390,13 +408,12 @@ weighted trial-specific evidence signals.
 | {pos.credible_interval_pct:.0f}% Credible Interval | {_fmt_pct(ci_l)} – {_fmt_pct(ci_u)} |
 
 The evidence signals shifted the posterior {delta_direction} by {abs(delta_pos):.1%} relative
-to the phase prior.
+to the prior mean.
 
 > **Model note:** The posterior PoS should be interpreted as a model-updated
-> estimate based on available trial-specific signals. It reflects the Beta-binomial
-> framework's weighted assessment of the evidence, not a regulatory probability
-> of approval or a commercial success probability. Signal weights are untrained
-> MVP assumptions configurable in config.py."""
+> estimate based on available trial-specific signals. The same posterior used here
+> is passed directly to the valuation Monte Carlo — report and simulation are consistent.
+> Signal weights are untrained MVP assumptions configurable in config.py."""
 
 
 def _ctc_section(r: AuditResponse, req: AuditRequest) -> str:
@@ -669,13 +686,16 @@ def _assumptions_section(r: AuditResponse) -> str:
   data; they represent directional expert priors.
 - Clinical milestone timing uses a Gamma distribution parameterised from the stated
   management timeline; actual timelines may differ materially.
-- The model does not capture strategic transactions, partnerships, licensing revenue,
-  or non-dilutive financing that could extend runway.
+- The model can mechanically include planned financing inflows
+  (ATM, PIPE, partnership upfront, debt) via planned_financing_events. It does not
+  independently estimate the probability, economics, or terms of unplanned transactions.
 - rNPV outputs are mechanical functions of user-supplied asset value assumptions.
 - Public filings may not reflect recent financing activity, confidential partnership
   discussions, or protocol amendments not yet disclosed.
 - The Jensen-Shannon divergence disclosure score is based on user-supplied narrative
-  and audit distributions; it does not independently analyse SEC filings or press releases."""
+  and audit distributions; it does not independently analyse SEC filings or press releases.
+- SEC, ClinicalTrials.gov, and FRED data clients are scaffolded but not yet integrated
+  into the audit path. All inputs in /audit are manual unless provenance fields are supplied."""
 
 
 def _conclusion_section(r: AuditResponse, req: AuditRequest) -> str:
@@ -750,27 +770,36 @@ not replace, professional analyst diligence and institutional risk management pr
 
 def _data_quality_section(r: AuditResponse) -> str:
     dq = r.data_quality
-    score_label = {"high": "High ✓", "moderate": "Moderate ⚠", "low": "Low ✗"}.get(
+    completeness_label = {"high": "High ✓", "moderate": "Moderate ⚠", "low": "Low ✗"}.get(
         dq.data_quality_score, dq.data_quality_score
+    )
+    evidence_label = {"high": "High ✓", "moderate": "Moderate ⚠", "low": "Low ✗"}.get(
+        dq.evidence_quality_score, dq.evidence_quality_score
     )
     limitations = "\n".join(f"- {lim}" for lim in dq.primary_limitations) if dq.primary_limitations else "- None identified."
 
     return f"""## P. Data Quality Assessment
 
-| Dimension | Completeness | Notes |
+**Data completeness** measures whether required fields were supplied.
+**Evidence quality** measures whether inputs are source-traced to verifiable external data
+(SEC filings, ClinicalTrials.gov, FRED) vs. manually entered. A complete manual input
+is not the same as a verified source-traced input.
+
+| Dimension | Score | Notes |
 |---|---|---|
-| Financial Data | {dq.financial_data_completeness:.0%} | Burn history, liquidity, market inputs |
-| Clinical Data | {dq.clinical_data_completeness:.0%} | Enrollment, timeline, complexity scores |
-| Disclosure Data | {dq.disclosure_data_completeness:.0%} | Narrative vs structured audit categories |
-| **Overall** | **{dq.overall_completeness:.0%}** | **{score_label}** |
+| Financial Data Completeness | {dq.financial_data_completeness:.0%} | Burn history, liquidity, market inputs |
+| Clinical Data Completeness | {dq.clinical_data_completeness:.0%} | Enrollment, timeline, complexity scores |
+| Disclosure Data Completeness | {dq.disclosure_data_completeness:.0%} | Narrative vs structured audit categories |
+| **Overall Completeness** | **{dq.overall_completeness:.0%}** | **{completeness_label}** |
+| **Evidence Quality** | **{evidence_label}** | {dq.evidence_quality_note} |
 
 ### Primary Data Limitations
 
 {limitations}
 
-> Data quality affects model confidence. Low-completeness inputs reduce the
-> reliability of probabilistic outputs. Treat low-quality model results as
-> directional indicators only."""
+> Low evidence quality does not invalidate completeness, but it means outputs cannot
+> be cross-checked against independent data sources. All manual inputs are unverified
+> unless provenance is explicitly source-traced."""
 
 
 def _model_validation_section(r: AuditResponse) -> str:
@@ -885,6 +914,282 @@ def _provenance_appendix(r: AuditResponse) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Value of Information section
+# ---------------------------------------------------------------------------
+
+def _value_of_information_section(r: AuditResponse) -> str:
+    voi = r.value_of_information
+    if voi is None:
+        return ""
+
+    rows = "\n".join(
+        f"| {s.signal_name.replace('_', ' ').title()} | {s.category.title()} "
+        f"| {s.signal_weight:.1f} | {_fmt_m(s.evsi_dollars)} "
+        f"| {_fmt_m(s.ev_if_positive)} | {_fmt_m(s.ev_if_negative)} |"
+        for s in voi.per_signal_evsi[:8]  # top 8 signals
+    )
+
+    return f"""## U. Expected Value of Information (EVPI / EVSI)
+
+### Overview
+
+{voi.evpi_interpretation}
+
+| Metric | Value |
+|---|---:|
+| EVPI (perfect clinical outcome info) | {_fmt_m(voi.evpi_dollars)} ({voi.evpi_pct_of_ev:.1f}% of EV) |
+| Top diligence signal | {voi.top_diligence_priority} |
+| Total EVSI across all signals | {_fmt_m(voi.total_observable_evsi)} |
+
+### Diligence Signal Prioritisation (ranked by EVSI)
+
+| Signal | Category | Weight | EVSI | EV if Positive | EV if Negative |
+|---|---|---:|---:|---:|---:|
+{rows}
+
+### Methodology Note
+
+*{voi.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# Distributional robustness section
+# ---------------------------------------------------------------------------
+
+def _robustness_section(r: AuditResponse) -> str:
+    rob = r.robustness
+    if rob is None:
+        return ""
+
+    return f"""## Y. Distributional Robustness (Wasserstein DRO)
+
+{rob.robustness_interpretation}
+
+| Wasserstein Epsilon | Worst-Case Cashout Prob | Worst-Case EV |
+|---|---:|---:|
+| ε = 0.05 (minor misspecification) | {rob.worst_case_cashout_prob_e05:.1%} | {_fmt_m(rob.worst_case_ev_e05)} |
+| ε = 0.10 (moderate misspecification) | {rob.worst_case_cashout_prob_e10:.1%} | {_fmt_m(rob.worst_case_ev_e10)} |
+| ε = 0.20 (substantial misspecification) | {rob.worst_case_cashout_prob_e20:.1%} | {_fmt_m(rob.worst_case_ev_e20)} |
+| ε = 0.10 best-case | {rob.best_case_cashout_prob_e10:.1%} | {_fmt_m(rob.best_case_ev_e10)} |
+
+*{rob.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# BMA section
+# ---------------------------------------------------------------------------
+
+def _bma_section(r: AuditResponse) -> str:
+    bma = r.bma
+    if bma is None:
+        return ""
+
+    top_rows = "\n".join(
+        f"| k={mw.k:.2f} | λ={mw.lambda_:.3f} | {mw.posterior_weight:.1%} "
+        f"| {mw.model_cashout_prob:.1%} | {_fmt_m(mw.model_ev)} |"
+        for mw in bma.model_weights[:5]
+    )
+
+    return f"""## Z. Bayesian Model Averaging
+
+BMA-averaged cashout probability: **{bma.bma_cashout_prob:.1%}** (vs nominal from single model).
+BMA-averaged EV: **{_fmt_m(bma.bma_ev)}**
+Effective number of models (posterior entropy): **{bma.effective_n_models:.1f}** of 9 candidates.
+
+### Top-5 Model Weights
+
+| Weibull k | λ (rate) | Posterior Weight | Model Cashout Prob | Model EV |
+|---|---|---:|---:|---:|
+{top_rows}
+
+*{bma.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# Copula dependence section
+# ---------------------------------------------------------------------------
+
+def _dependence_section(r: AuditResponse) -> str:
+    dep = r.dependence
+    if dep is None:
+        return ""
+
+    return f"""## AA. Copula Dependence Analysis
+
+Base cashout probability (independence): **{dep.base_cashout_prob:.1%}**
+
+| Scenario | Rho | Copula Cashout Prob | Effect |
+|---|---:|---:|---:|
+| Enrollment delays ~ financing stress | +0.30 | {dep.positive_rho_cashout_prob:.1%} | {dep.positive_rho_dependence_effect:+.1%} |
+| Clinical progress ~ financing unlock | -0.20 | {dep.negative_rho_cashout_prob:.1%} | {dep.negative_rho_dependence_effect:+.1%} |
+
+**Positive correlation (rho=+0.30):** {dep.positive_rho_interpretation}
+
+**Negative correlation (rho=-0.20):** {dep.negative_rho_interpretation}
+
+*{dep.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# State-space model section
+# ---------------------------------------------------------------------------
+
+def _state_space_section(r: AuditResponse) -> str:
+    ss = r.state_space
+    if ss is None:
+        return ""
+
+    def _bar(score: float, width: int = 20) -> str:
+        filled = int(round(score * width))
+        return "▓" * filled + "░" * (width - filled) + f" {score:.2f}"
+
+    anomaly_note = (
+        f" ⚠ Anomaly score {ss.anomaly_score:.2f} — inputs surprising given prior."
+        if ss.anomaly_score > 0.40 else ""
+    )
+
+    return f"""## BB. Bayesian State-Space Model
+
+Bootstrap particle filter (1000 particles) over latent company health state.{anomaly_note}
+
+| Dimension | Score | Bar |
+|---|---:|---|
+| Cash Health (log runway normalised) | {ss.cash_health_score:.3f} | {_bar(ss.cash_health_score)} |
+| Burn Acceleration (lower = more stress) | {ss.burn_acceleration_signal:.3f} | {_bar(ss.burn_acceleration_signal)} |
+| Clinical Progress (enrollment fraction) | {ss.clinical_progress_signal:.3f} | {_bar(ss.clinical_progress_signal)} |
+| Market Condition | {ss.market_condition_signal:.3f} | {_bar(ss.market_condition_signal)} |
+
+**Effective Sample Size:** {ss.effective_sample_size:.0f} / 1000
+
+**Interpretation:** {ss.interpretation}
+
+*{ss.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# Real-options valuation section
+# ---------------------------------------------------------------------------
+
+def _real_options_section(r: AuditResponse) -> str:
+    ro = r.real_options
+    if ro is None:
+        return ""
+
+    prem_sign = "+" if ro.real_options_premium >= 0 else ""
+
+    assumptions = "\n".join(f"- {a}" for a in (ro.model_assumptions or []))
+
+    return f"""## W. Real-Options Valuation
+
+The program is modelled as a compound real option: the right (not obligation) to
+invest in full development at the clinical catalyst, with the underlying asset
+value following GBM with sigma={60:.0f}%.
+
+| Metric | Value |
+|---|---:|
+| ROV Mean | {_fmt_m(ro.rov_mean)} |
+| ROV Median | {_fmt_m(ro.rov_median)} |
+| ROV P5 / P95 | {_fmt_m(ro.rov_p5)} / {_fmt_m(ro.rov_p95)} |
+| Static rNPV (PoS × V × discount) | {_fmt_m(ro.rnpv_static)} |
+| Real-Options Premium | {prem_sign}{_fmt_m(ro.real_options_premium)} ({prem_sign}{ro.real_options_premium_pct:.1f}%) |
+| Abandonment Option Value | {_fmt_m(ro.abandonment_value)} |
+
+The real-options premium is the additional value from being able to abandon the
+program on failure rather than being forced to pay the full investment cost regardless
+of clinical outcome.
+
+### Model Assumptions
+
+{assumptions}"""
+
+
+# ---------------------------------------------------------------------------
+# Shapley risk attribution section
+# ---------------------------------------------------------------------------
+
+def _risk_attribution_section(r: AuditResponse) -> str:
+    ra = r.risk_attribution
+    if ra is None or not ra.components:
+        return ""
+
+    rows = "\n".join(
+        f"| {c.rank} | {c.driver.replace('_', ' ').title()} | {c.description} "
+        f"| {c.cashout_prob_shapley:+.1%} | {_fmt_m(c.ev_shapley)} |"
+        for c in sorted(ra.components, key=lambda x: x.rank)
+    )
+
+    return f"""## X. Shapley Risk Attribution
+
+Approximate Shapley decomposition of cashout probability and EV uncertainty
+across the {len(ra.components)} primary risk drivers.
+
+| Rank | Driver | Description | Cashout Prob Contribution | EV Contribution |
+|---:|---|---|---:|---:|
+{rows}
+
+**Total explained cashout probability shift:** {ra.explained_cashout_prob:+.1%}
+**Total explained EV shift:** {_fmt_m(ra.explained_ev)}
+
+*{ra.methodology_note}*"""
+
+
+# ---------------------------------------------------------------------------
+# Multi-state competing-risk section
+# ---------------------------------------------------------------------------
+
+def _multistate_section(r: AuditResponse) -> str:
+    ms = r.multi_state
+    if ms is None:
+        return ""
+
+    state_rows = "\n".join(
+        f"| {name.replace('_', ' ').title()} | {prob:.1%} |"
+        for name, prob in sorted(ms.absorbing_state_probs.items(), key=lambda x: -x[1])
+    )
+
+    cif_rows = "\n".join(
+        f"| {name.replace('_', ' ').title()} | {prob:.1%} |"
+        for name, prob in sorted(ms.cif_at_catalyst_month.items(), key=lambda x: -x[1])
+    )
+
+    survival_note = (
+        f"{ms.overall_survival_at_catalyst_month:.1%} probability of still being in the "
+        f"operating (unfunded) state at the catalyst month."
+        if ms.overall_survival_at_catalyst_month is not None else ""
+    )
+
+    median_note = (
+        f"Median time to absorption across all causes: **{ms.median_transition_time:.1f} months**."
+        if ms.median_transition_time is not None else ""
+    )
+
+    assumptions = "\n".join(f"- {a}" for a in (ms.model_assumptions or []))
+
+    return f"""## V. Multi-State Competing-Risk Analysis
+
+### Absorbing State Probabilities (by Horizon End)
+
+| State | Probability |
+|---|---:|
+{state_rows}
+| Still Operating (no event) | {ms.overall_survival_at_horizon:.1%} |
+
+{median_note}
+
+### Cumulative Incidence at Catalyst Month
+
+{survival_note}
+
+| Cause | CIF at Catalyst Month |
+|---|---:|
+{cif_rows}
+
+### Model Assumptions
+
+{assumptions}"""
+
+
+# ---------------------------------------------------------------------------
 # Master report assembler
 # ---------------------------------------------------------------------------
 
@@ -913,8 +1218,16 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
         _scenario_section(r, req),
         _sensitivity_section(r, req),
         _diligence_questions_section(r),
+        _value_of_information_section(r),
+        _real_options_section(r),
+        _risk_attribution_section(r),
+        _robustness_section(r),
+        _bma_section(r),
+        _dependence_section(r),
+        _state_space_section(r),
+        _multistate_section(r),
         _assumptions_section(r),
         _provenance_appendix(r),
         _conclusion_section(r, req),
     ]
-    return "\n\n---\n\n".join(sections)
+    return "\n\n---\n\n".join(s for s in sections if s)

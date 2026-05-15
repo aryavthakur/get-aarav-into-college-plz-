@@ -25,6 +25,16 @@ CatalystType = Literal[
     "regulatory_submission", "approval_decision", "proof_of_concept",
 ]
 FinancingEventKind = Literal["clean_refi", "distressed_refi", "partnership"]
+
+FinancingState = Literal[
+    "funded",
+    "clean_refinancing",
+    "distressed_refinancing",
+    "partnership",
+    "debt_or_royalty",
+    "program_discontinuation",
+    "cash_exhaustion",
+]
 CashPathState = Literal["continue", "cash_exhaustion", "horizon_reached"]
 SourceType = Literal["sec_filing", "clinicaltrials", "deck", "press_release", "manual_input"]
 
@@ -201,6 +211,13 @@ class SimulationConfig(BaseModel):
     monthly_horizon: int = Field(48, ge=12, le=120)
     baseline_lambda: float = Field(0.035, gt=0)
     baseline_k: float = Field(1.30, gt=0)
+    use_multistate: bool = Field(
+        False,
+        description=(
+            "Enable multi-state competing-risk engine (8 absorbing states). "
+            "When False, uses the legacy binary Cox-Weibull sampler."
+        ),
+    )
 
 
 class AuditRequest(BaseModel):
@@ -467,6 +484,142 @@ class FinalSummaryResult(BaseModel):
     diligence_questions: List[str]
 
 
+class StateSpaceResult(BaseModel):
+    """Bayesian state-space model output from particle filter."""
+    cash_health_score: float = Field(ge=0.0, le=1.0)
+    burn_acceleration_signal: float = Field(ge=0.0, le=1.0)
+    clinical_progress_signal: float = Field(ge=0.0, le=1.0)
+    market_condition_signal: float = Field(ge=0.0, le=1.0)
+    anomaly_score: float = Field(ge=0.0, le=1.0)
+    current_state_posterior_mean: List[float]
+    current_state_posterior_std: List[float]
+    predicted_state_posterior_mean: List[float]
+    effective_sample_size: float
+    interpretation: str
+    methodology_note: str
+
+
+class RobustnessResult(BaseModel):
+    """Wasserstein-ball DRO bounds on cashout probability and EV."""
+    nominal_cashout_prob: float
+    nominal_ev: float
+    worst_case_cashout_prob_e05: float
+    worst_case_cashout_prob_e10: float
+    worst_case_cashout_prob_e20: float
+    worst_case_ev_e05: float
+    worst_case_ev_e10: float
+    worst_case_ev_e20: float
+    best_case_cashout_prob_e10: float
+    best_case_ev_e10: float
+    robustness_interpretation: str
+    methodology_note: str
+
+
+class ModelWeightSchema(BaseModel):
+    k: float
+    lambda_: float
+    posterior_weight: float
+    model_cashout_prob: float
+    model_ev: float
+
+
+class BMAResult(BaseModel):
+    """Bayesian model averaging over Weibull model candidates."""
+    bma_cashout_prob: float
+    bma_ev: float
+    model_weights: List[ModelWeightSchema]
+    effective_n_models: float
+    highest_weight_model_k: float
+    highest_weight_model_lambda: float
+    methodology_note: str
+
+
+class DependenceAnalysisResult(BaseModel):
+    """Gaussian copula analysis of T_fin / T_sci rank correlation."""
+    base_cashout_prob: float
+    positive_rho_cashout_prob: float
+    positive_rho_dependence_effect: float
+    positive_rho_interpretation: str
+    negative_rho_cashout_prob: float
+    negative_rho_dependence_effect: float
+    negative_rho_interpretation: str
+    methodology_note: str
+
+
+class RealOptionsResult(BaseModel):
+    """Real-options valuation output (compound option on clinical success)."""
+    rov_mean: float
+    rov_median: float
+    rov_p5: float
+    rov_p95: float
+    rnpv_static: float
+    real_options_premium: float
+    real_options_premium_pct: float
+    abandonment_value: float
+    model_assumptions: List[str]
+
+
+class ShapleyComponentSchema(BaseModel):
+    driver: str
+    description: str
+    cashout_prob_shapley: float
+    ev_shapley: float
+    rank: int
+
+
+class RiskAttributionResult(BaseModel):
+    """Shapley-based decomposition of cashout probability and EV uncertainty."""
+    components: List[ShapleyComponentSchema]
+    total_cashout_prob: float
+    total_ev: float
+    explained_cashout_prob: float
+    explained_ev: float
+    methodology_note: str
+
+
+class MultiStateResult(BaseModel):
+    """Output of the multi-state competing-risk engine (8 absorbing states)."""
+    absorbing_state_probs: Dict[str, float] = Field(
+        description="Fraction of simulation paths absorbed into each state by horizon end",
+    )
+    overall_survival_at_horizon: float = Field(
+        description="S(horizon): fraction of paths still in operating state at end of horizon",
+    )
+    median_transition_time: Optional[float] = Field(
+        None, description="Median time to absorption across all causes (months)",
+    )
+    cif_at_catalyst_month: Dict[str, float] = Field(
+        default_factory=dict,
+        description="CIF_j(catalyst_month) for each cause; empty when catalyst_month is None",
+    )
+    overall_survival_at_catalyst_month: Optional[float] = Field(
+        None, description="S(catalyst_month): probability of being in operating state at catalyst",
+    )
+    model_assumptions: List[str] = Field(default_factory=list)
+
+
+class SignalEVSISchema(BaseModel):
+    signal_name: str
+    description: str
+    category: str
+    signal_weight: float
+    evsi_dollars: float
+    ev_if_positive: float
+    ev_if_negative: float
+    p_positive: float
+
+
+class ValueOfInformationResult(BaseModel):
+    """EVPI and per-signal EVSI for diligence prioritization."""
+    evpi_dollars: float
+    evpi_pct_of_ev: float
+    evpi_interpretation: str
+    per_signal_evsi: List[SignalEVSISchema]
+    top_diligence_priority: str
+    total_observable_evsi: float
+    methodology_note: str
+
+
 class DataQualityResult(BaseModel):
     financial_data_completeness: float = Field(ge=0.0, le=1.0)
     clinical_data_completeness: float = Field(ge=0.0, le=1.0)
@@ -474,6 +627,8 @@ class DataQualityResult(BaseModel):
     overall_completeness: float = Field(ge=0.0, le=1.0)
     primary_limitations: List[str]
     data_quality_score: Literal["high", "moderate", "low"]
+    evidence_quality_score: Literal["high", "moderate", "low"] = "low"
+    evidence_quality_note: str = "All inputs are manual; no SEC/ClinicalTrials.gov source tracing applied."
 
 
 class ValidationSnapshot(BaseModel):
@@ -521,6 +676,14 @@ class AuditResponse(BaseModel):
     burn_regime: BurnRegimeResult
     disclosure_consistency: DisclosureConsistencyResult
     final_summary: FinalSummaryResult
+    multi_state: Optional[MultiStateResult] = None
+    value_of_information: Optional[ValueOfInformationResult] = None
+    real_options: Optional[RealOptionsResult] = None
+    risk_attribution: Optional[RiskAttributionResult] = None
+    robustness: Optional[RobustnessResult] = None
+    bma: Optional[BMAResult] = None
+    dependence: Optional[DependenceAnalysisResult] = None
+    state_space: Optional[StateSpaceResult] = None
     warnings: List[str]
     assumptions: List[str]
     markdown_report: str

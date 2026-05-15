@@ -43,6 +43,14 @@ def simulate_cash_path(
     total_raised = float(events_by_month.get(0, 0.0))
 
     if cash <= 0:
+        # Company has no cash after month-0 events; project the full deficit path analytically.
+        # capital_needed must cover the current shortfall plus the full horizon burn.
+        immediate_shortfall = max(0.0, -cash)
+        burn_det = inputs.monthly_burn
+        capital_to_survive = immediate_shortfall + burn_det * inputs.horizon_months
+        capital_to_catalyst = None
+        if inputs.catalyst_month is not None:
+            capital_to_catalyst = immediate_shortfall + burn_det * float(inputs.catalyst_month)
         return CashPathResult(
             cash_exhaustion_month=0,
             final_state="cash_exhaustion",
@@ -50,10 +58,10 @@ def simulate_cash_path(
             ending_cash=0.0,
             total_burn=0.0,
             total_capital_raised=round(total_raised, 2),
-            cash_shortfall_at_exhaustion=round(abs(cash), 2),
-            maximum_cash_deficit=round(abs(cash), 2),
-            capital_needed_to_survive_horizon=round(abs(cash), 2),
-            capital_needed_to_reach_catalyst=round(abs(cash), 2) if inputs.catalyst_month is not None else None,
+            cash_shortfall_at_exhaustion=round(immediate_shortfall, 2),
+            maximum_cash_deficit=round(capital_to_survive, 2),
+            capital_needed_to_survive_horizon=round(capital_to_survive, 2),
+            capital_needed_to_reach_catalyst=round(capital_to_catalyst, 2) if capital_to_catalyst is not None else None,
             monthly_balances=[],
         )
 
