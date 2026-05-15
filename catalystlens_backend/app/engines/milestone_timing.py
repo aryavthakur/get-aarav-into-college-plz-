@@ -81,11 +81,11 @@ def _compute_delay_factor(
     # Trial status
     factor *= _STATUS_DELAY_MULTIPLIER.get(clinical.trial_status, 1.1)
 
-    # Few sites constrain enrollment speed
-    if clinical.number_of_sites < 10:
-        factor *= 1.10
-    elif clinical.number_of_sites < 5:
+    # Few sites constrain enrollment speed (order matters: most restrictive condition first)
+    if clinical.number_of_sites < 5:
         factor *= 1.20
+    elif clinical.number_of_sites < 10:
+        factor *= 1.10
 
     return max(1.0, factor)
 

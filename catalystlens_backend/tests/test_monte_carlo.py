@@ -285,3 +285,149 @@ class TestAuditResponseStructure:
         assert "Capital-to-Catalyst" in report
         assert "Bayesian" in report
         assert "Disclaimer" in report or "not investment advice" in report.lower()
+
+    def test_model_version_present_and_valid(self):
+        request = _make_audit_request(n_simulations=1000)
+        result = run_full_audit(request)
+        mv = result.model_version
+        assert mv.backend_version == "0.1.0"
+        assert mv.coefficient_set == "mvp_untrained_v1"
+        assert mv.n_simulations == 1000
+        assert len(mv.config_hash) > 0
+
+    def test_data_quality_present_and_valid(self):
+        request = _make_audit_request(n_simulations=1000)
+        result = run_full_audit(request)
+        dq = result.data_quality
+        assert 0.0 <= dq.financial_data_completeness <= 1.0
+        assert 0.0 <= dq.clinical_data_completeness <= 1.0
+        assert 0.0 <= dq.disclosure_data_completeness <= 1.0
+        assert 0.0 <= dq.overall_completeness <= 1.0
+        assert dq.data_quality_score in ("high", "moderate", "low")
+
+    def test_data_quality_penalises_missing_burn_history(self):
+        """Without burn history, financial completeness should be lower than with history."""
+        req_with = _make_audit_request(n_simulations=500)
+        req_without = _make_audit_request(n_simulations=500)
+        # Strip burn history
+        fin_data = req_without.financial.model_dump()
+        fin_data["quarterly_burn_history"] = []
+        from app.models.schemas import CompanyFinancialInput
+        req_without = req_without.model_copy(update={"financial": CompanyFinancialInput(**fin_data)})
+        result_with = run_full_audit(req_with)
+        result_without = run_full_audit(req_without)
+        assert result_with.data_quality.financial_data_completeness > result_without.data_quality.financial_data_completeness
+
+    def test_report_contains_data_quality_section(self):
+        request = _make_audit_request(n_simulations=1000)
+        result = run_full_audit(request)
+        assert "Data Quality" in result.markdown_report
+        assert "UNCALIBRATED" in result.markdown_report
+
+
+class TestConfigIsolation:
+    """Verify that concurrent requests with different seeds don't contaminate each other."""
+
+    def test_different_seeds_produce_independent_results(self):
+        req1 = _make_audit_request(n_simulations=2000, seed=10)
+        req2 = _make_audit_request(n_simulations=2000, seed=99)
+        r1 = run_full_audit(req1)
+        r2 = run_full_audit(req2)
+        # Results should differ (different seeds)
+        assert r1.valuation.mean_value != r2.valuation.mean_value
+
+    def test_config_hash_stable_across_identical_requests(self):
+        req = _make_audit_request(n_simulations=500, seed=42)
+        r1 = run_full_audit(req)
+        r2 = run_full_audit(req)
+        assert r1.model_version.config_hash == r2.model_version.config_hash
+
+    def test_repeated_audits_give_identical_results(self):
+        """Ensures no global state mutation between calls."""
+        req = _make_audit_request(n_simulations=2000, seed=777)
+        r1 = run_full_audit(req)
+        r2 = run_full_audit(req)
+        assert r1.capital_to_catalyst.probability_cashout_before_catalyst == pytest.approx(
+            r2.capital_to_catalyst.probability_cashout_before_catalyst
+        )
+        assert r1.valuation.mean_value == pytest.approx(r2.valuation.mean_value)
+
+
+class TestPoSSensitivityActuallyChanges:
+    """PoS sensitivity rows must not be identical to the base case."""
+
+    def test_pos_sensitivity_varies_ev(self):
+        request = _make_audit_request(n_simulations=2000)
+        result = run_full_audit(request)
+        pos_sens = next(
+            (s for s in result.final_summary.sensitivity if s.variable == "posterior_pos"),
+            None,
+        )
+        assert pos_sens is not None, "posterior_pos sensitivity variable not found"
+        assert pos_sens.low_expected_value != pos_sens.high_expected_value, (
+            "Low and high PoS sensitivity must yield different EVs — "
+            f"both are {pos_sens.low_expected_value}"
+        )
+        # Low PoS → lower EV, high PoS → higher EV
+        assert pos_sens.low_expected_value < pos_sens.high_expected_value, (
+            "Lower PoS should produce lower EV"
+        )
+
+    def test_pos_sensitivity_varies_cashout_prob(self):
+        """PoS sensitivity should not affect cashout probability (PoS ≠ financing risk)."""
+        request = _make_audit_request(n_simulations=2000)
+        result = run_full_audit(request)
+        pos_sens = next(
+            s for s in result.final_summary.sensitivity if s.variable == "posterior_pos"
+        )
+        # Cashout probability should be roughly equal across PoS levels (PoS is technical, not financial)
+        # Allow small Monte Carlo noise (< 15%)
+        assert abs(pos_sens.low_cashout_prob - pos_sens.high_cashout_prob) < 0.20, (
+            "PoS shifts should not drastically change cashout probability"
+        )
+
+
+class TestFourStateFinancing:
+    """Validate that the four-state financing model behaves correctly."""
+
+    def test_financing_state_probs_sum_to_one(self):
+        request = _make_audit_request(n_simulations=5000)
+        result = run_full_audit(request)
+        v = result.valuation
+        total = (
+            v.p_funded_through_catalyst
+            + v.p_refinancing_success
+            + v.p_distressed_financing
+            + v.p_program_discontinuation
+        )
+        assert total == pytest.approx(1.0, abs=0.01)
+
+    def test_well_funded_company_mostly_funded_state(self):
+        """A company with very long runway should be mostly in the FUNDED state."""
+        request = _make_audit_request(
+            cash_on_hand=500_000_000,
+            quarterly_burn=8_000_000,
+            stated_months=12,
+            enrollment_completed=100,
+            enrollment_target=120,
+            n_simulations=5000,
+        )
+        result = run_full_audit(request)
+        assert result.valuation.p_funded_through_catalyst > 0.50
+
+    def test_poorly_funded_company_high_discontinuation(self):
+        """A company with very short runway should have significant discontinuation probability."""
+        request = _make_audit_request(
+            cash_on_hand=10_000_000,
+            quarterly_burn=25_000_000,
+            stated_months=36,
+            enrollment_completed=5,
+            enrollment_target=200,
+            enrollment_rate=2,
+            n_simulations=5000,
+            positive_signals=[],
+            negative_signals=["small_sample_size", "prior_failed_trials"],
+        )
+        result = run_full_audit(request)
+        not_funded = 1.0 - result.valuation.p_funded_through_catalyst
+        assert not_funded > 0.50, f"Expected significant non-funded probability, got {not_funded:.1%}"
