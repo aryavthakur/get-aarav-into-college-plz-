@@ -1091,13 +1091,14 @@ def _real_options_section(r: AuditResponse) -> str:
 
 The program is modelled as a compound real option: the right (not obligation) to
 invest in full development at the clinical catalyst, with the underlying asset
-value following GBM with sigma={60:.0f}%.
+value following GBM with sigma={ro.asset_volatility:.0%}.
 
 | Metric | Value |
 |---|---:|
 | Method Status | {ro.method_status} |
 | ROV Mean | {_fmt_m(ro.rov_mean)} |
 | Financing-Adjusted ROV | {_fmt_m(ro.financing_adjusted_rov)} |
+| Exercise Cost | {_fmt_m(ro.exercise_cost)} |
 | ROV Median | {_fmt_m(ro.rov_median)} |
 | ROV P5 / P95 | {_fmt_m(ro.rov_p5)} / {_fmt_m(ro.rov_p95)} |
 | Static rNPV (PoS × V × discount) | {_fmt_m(ro.rnpv_static)} |

@@ -87,8 +87,9 @@ class StateSpaceResult:
     interpretation: str
     method_status: str = "experimental_scaffold"
     methodology_note: str = (
-        "Experimental state-space scaffold using a bootstrap particle-filter-style update with 1000 particles. "
+        "Experimental single-snapshot state-space scaffold using a bootstrap particle-filter-style update with 1000 particles. "
         "Latent state z_t: [log_runway, burn_trend, clinical_progress, market_condition]. "
+        "This is not a fully dynamic historical filter over y_1...y_t; it smooths current observables. "
         "Observation likelihood via Gaussian with sigma=0.20. "
         "Anomaly score = 1 - ESS/N; high values indicate inputs inconsistent with prior."
     )

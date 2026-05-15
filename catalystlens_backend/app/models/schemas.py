@@ -567,6 +567,8 @@ class RealOptionsResult(BaseModel):
     real_options_premium_pct: float
     abandonment_value: float
     financing_adjusted_rov: float = 0.0
+    exercise_cost: float = 0.0
+    asset_volatility: float = 0.60
     model_assumptions: List[str]
     method_status: MethodStatus = "experimental_scaffold"
 

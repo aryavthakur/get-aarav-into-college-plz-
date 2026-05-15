@@ -230,3 +230,10 @@ class TestVoIInAudit:
     def test_voi_methodology_note_present(self):
         r = run_full_audit(self._request())
         assert len(r.value_of_information.methodology_note) > 10
+
+    def test_voi_methodology_scopes_to_binary_invest_pass(self):
+        r = run_full_audit(self._request())
+        note = r.value_of_information.methodology_note.lower()
+        report = r.markdown_report.lower()
+        assert "binary invest/pass" in note
+        assert "not position sizing" in report
