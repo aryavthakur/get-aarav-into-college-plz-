@@ -40,25 +40,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from app.core.config import CatalystLensConfig, get_default_config
 from app.models.schemas import ValuationInput, ValuationResult
-
-# Multiplier applied to expected_dilution_if_refinanced in distressed state
-_DISTRESSED_DILUTION_MULTIPLIER = 2.0
-
-# Gap threshold (months) above which a refinancing is classified as distressed
-_DISTRESSED_GAP_THRESHOLD = 12.0
-
-# Market condition score below which all refinancings are classified as distressed
-_DISTRESSED_MARKET_THRESHOLD = 4.0
-
-# Base probability of successful refinancing when needed (at market_score=5, gap=0)
-_BASE_REFINANCING_SUCCESS_PROB = 0.60
-
-# How much each point of market condition shifts refinancing success probability
-_MARKET_CONDITION_REFIN_EFFECT = 0.04
-
-# How much each month of financing gap reduces refinancing success probability
-_GAP_REFIN_PENALTY_PER_MONTH = 0.015
 
 
 def _compute_financing_states(
@@ -67,6 +50,8 @@ def _compute_financing_states(
     rng: np.random.Generator,
     market_condition_score: float,
     expected_dilution: float,
+    financing_penalty_strength: float,
+    config: CatalystLensConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Classify each simulation into one of four financing states.
@@ -85,9 +70,9 @@ def _compute_financing_states(
 
     # Probability of successful refinancing conditional on needing it
     p_refin = np.clip(
-        _BASE_REFINANCING_SUCCESS_PROB
-        + (market_condition_score - 5.0) * _MARKET_CONDITION_REFIN_EFFECT
-        - gap * _GAP_REFIN_PENALTY_PER_MONTH,
+        config.valuation_params.base_refinancing_success_prob
+        + (market_condition_score - 5.0) * config.valuation_params.market_condition_refinancing_effect
+        - gap * config.valuation_params.gap_refinancing_penalty_per_month,
         0.05,
         0.90,
     )
@@ -97,7 +82,10 @@ def _compute_financing_states(
     refin_success = rng.binomial(1, refin_needed_prob).astype(bool)
 
     # Distressed: gap too large or market too weak to support clean refinancing
-    is_distressed = (gap > _DISTRESSED_GAP_THRESHOLD) | (market_condition_score < _DISTRESSED_MARKET_THRESHOLD)
+    is_distressed = (
+        (gap > config.valuation_params.distressed_gap_threshold)
+        | (market_condition_score < config.valuation_params.distressed_market_threshold)
+    )
 
     # Assign states
     states[funded_mask] = 0
@@ -107,9 +95,14 @@ def _compute_financing_states(
 
     # Value adjustments
     adjustments = np.ones(n, dtype=float)
-    adjustments[states == 1] = 1.0 - expected_dilution
+    adjustments[states == 1] = 1.0 - expected_dilution * financing_penalty_strength
     adjustments[states == 2] = np.clip(
-        1.0 - expected_dilution * _DISTRESSED_DILUTION_MULTIPLIER, 0.0, 1.0
+        1.0
+        - expected_dilution
+        * config.valuation_params.distressed_dilution_multiplier
+        * financing_penalty_strength,
+        0.0,
+        1.0,
     )
     adjustments[states == 3] = 0.0   # no equity value; falls to downside
 
@@ -123,6 +116,7 @@ def run_valuation_simulation(
     inputs: ValuationInput,
     rng: np.random.Generator,
     market_condition_score: float = 5.0,
+    config: CatalystLensConfig | None = None,
 ) -> ValuationResult:
     """
     Compute the full Monte Carlo valuation distribution using the four-state
@@ -142,6 +136,9 @@ def run_valuation_simulation(
     -------
     ValuationResult
     """
+    if config is None:
+        config = get_default_config()
+
     n = len(t_sci_samples)
 
     # Sample binary technical success for each simulation
@@ -150,7 +147,10 @@ def run_valuation_simulation(
     # Determine financing state and per-simulation value adjustment
     states, value_adj = _compute_financing_states(
         t_sci_samples, t_fin_samples, rng,
-        market_condition_score, inputs.expected_dilution_if_refinanced,
+        market_condition_score,
+        inputs.expected_dilution_if_refinanced,
+        inputs.financing_penalty_strength,
+        config,
     )
 
     # Time-discount applied to milestone timing (discounts value for later catalysts)
@@ -170,7 +170,10 @@ def run_valuation_simulation(
     # Technical-risk-only rNPV: no financing risk, no dilution
     mean_pos = float(np.mean(pos_samples))
     mean_discount = float(np.mean(discount))
-    technical_rnpv = inputs.asset_value_success * mean_pos * mean_discount
+    technical_rnpv = (
+        inputs.asset_value_success * mean_pos * mean_discount
+        + (1.0 - mean_pos) * float(inputs.downside_value)
+    )
 
     financing_rnpv = float(np.mean(values))
     financing_discount_value = technical_rnpv - financing_rnpv
@@ -206,8 +209,12 @@ def run_valuation_simulation(
         model_assumptions=[
             "Four financing states: Funded / Refinanced / Distressed / Discontinued.",
             "Refinancing success probability = f(market conditions, financing gap).",
-            "Distressed financing triggered when gap > 12 months or market score < 4.",
-            "Distressed dilution = 2× standard dilution assumption.",
+            (
+                "Distressed financing triggered when gap exceeds configured threshold "
+                "or market score is below configured threshold."
+            ),
+            "Distressed dilution uses the configured distressed dilution multiplier.",
+            "financing_penalty_strength scales clean and distressed refinancing haircuts.",
             "Discontinued state forces value to downside regardless of technical outcome.",
             "Asset value on success is a user-supplied assumption, not a model output.",
             "Discount rate is user-supplied; default 12% reflects typical biotech WACC.",

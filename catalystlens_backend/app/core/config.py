@@ -168,6 +168,17 @@ class BurnRegimeThresholds:
 
 
 @dataclass
+class ValuationParams:
+    """Assumption parameters for the four-state financing valuation model."""
+    distressed_dilution_multiplier: float = 2.0
+    distressed_gap_threshold: float = 12.0
+    distressed_market_threshold: float = 4.0
+    base_refinancing_success_prob: float = 0.60
+    market_condition_refinancing_effect: float = 0.04
+    gap_refinancing_penalty_per_month: float = 0.015
+
+
+@dataclass
 class CatalystLensConfig:
     """Master configuration object for all CatalystLens engines."""
     phase_priors: Dict[str, PhasePosPrior] = field(default_factory=lambda: {
@@ -185,6 +196,7 @@ class CatalystLensConfig:
     risk_thresholds: RiskThresholds = field(default_factory=RiskThresholds)
     disclosure_thresholds: DisclosureThresholds = field(default_factory=DisclosureThresholds)
     burn_regime_thresholds: BurnRegimeThresholds = field(default_factory=BurnRegimeThresholds)
+    valuation_params: ValuationParams = field(default_factory=ValuationParams)
 
     default_n_simulations: int = 10_000
     sensitivity_n_simulations: int = 1_000
