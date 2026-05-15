@@ -276,11 +276,15 @@ class TestMultiStateIntegration:
         from app.engines.monte_carlo import run_full_audit
         r = run_full_audit(self._make_request(use_multistate=False))
         assert r.multi_state is None
+        assert "Multi-state engine available but not active for this audit." in r.markdown_report
 
     def test_multistate_enabled_gives_result(self):
         from app.engines.monte_carlo import run_full_audit
         r = run_full_audit(self._make_request(use_multistate=True, n=500))
         assert r.multi_state is not None
+        assert r.multi_state.method_status == "uncalibrated_assumption"
+        assert "Multi-State" in r.markdown_report
+        assert "untrained MVP assumptions" in r.markdown_report
 
     def test_absorbing_state_probs_are_valid(self):
         from app.engines.monte_carlo import run_full_audit

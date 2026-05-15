@@ -48,6 +48,7 @@ class CopulaResult:
     dependence_effect: float
     copula_median_gap: float
     interpretation: str
+    method_status: str = "heuristic"
     methodology_note: str = (
         "Gaussian copula with correlation rho between financing and scientific timing ranks. "
         "Marginal distributions unchanged; only rank dependence is modified. "
@@ -88,6 +89,7 @@ def simulate_with_copula(
     t_sci_sorted: np.ndarray,
     rng: np.random.Generator,
     rho: float,
+    original_base_cashout: float | None = None,
 ) -> CopulaResult:
     """
     Resample t_fin and t_sci with Gaussian copula rank correlation rho.
@@ -102,8 +104,13 @@ def simulate_with_copula(
     n = len(t_fin_sorted)
     assert len(t_sci_sorted) == n, "t_fin and t_sci must have equal length"
 
-    # Independent baseline
-    independent_cashout = float(np.mean(t_fin_sorted < t_sci_sorted))
+    # Independent baseline. If original pairing is available, preserve it;
+    # sorted-pair comparison is not a valid baseline.
+    independent_cashout = (
+        float(original_base_cashout)
+        if original_base_cashout is not None
+        else float(np.mean(t_fin_sorted < t_sci_sorted))
+    )
 
     # Copula resampling: draw (U_fin, U_sci) from copula, then
     # map back to empirical quantiles of the original sorted arrays.
@@ -142,6 +149,7 @@ def simulate_with_copula(
         dependence_effect=round(effect, 4),
         copula_median_gap=round(copula_median_gap, 2),
         interpretation=interp,
+        method_status="heuristic",
     )
 
 
@@ -153,6 +161,7 @@ class DependenceAnalysisResult:
     negative_dependence_effect: float
     negative_interpretation: str
     base_cashout_prob: float
+    method_status: str = "heuristic"
     methodology_note: str = (
         "Gaussian copula over {T_fin, T_sci} marginals with rho=+0.30 (trial delays ~ financing stress) "
         "and rho=-0.20 (clinical progress ~ financing unlock). "
@@ -170,9 +179,10 @@ def run_dependence_analysis(
     """
     t_fin_s = np.sort(t_fin)
     t_sci_s = np.sort(t_sci)
+    base_cashout = float(np.mean(t_fin < t_sci))
 
-    pos_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=+0.30)
-    neg_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=-0.20)
+    pos_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=+0.30, original_base_cashout=base_cashout)
+    neg_result = simulate_with_copula(t_fin_s, t_sci_s, rng, rho=-0.20, original_base_cashout=base_cashout)
 
     return DependenceAnalysisResult(
         positive_rho=pos_result,
@@ -180,5 +190,6 @@ def run_dependence_analysis(
         negative_copula_cashout_prob=neg_result.copula_cashout_prob,
         negative_dependence_effect=neg_result.dependence_effect,
         negative_interpretation=neg_result.interpretation,
-        base_cashout_prob=round(float(np.mean(t_fin < t_sci)), 4),
+        base_cashout_prob=round(base_cashout, 4),
+        method_status="heuristic",
     )

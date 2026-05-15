@@ -1,5 +1,5 @@
 """
-Bayesian Model Averaging (BMA) for CatalystLens.
+Proxy Bayesian-style model averaging for CatalystLens.
 
 Rather than committing to a single parameter setting, BMA computes a
 posterior-weighted average over a discrete set of plausible models.
@@ -89,11 +89,12 @@ class BMAResult:
     effective_n_models: float
     highest_weight_model_k: float
     highest_weight_model_lambda: float
+    method_status: str = "heuristic"
     methodology_note: str = (
-        "Bayesian Model Averaging over 9 Weibull models "
+        "Proxy Bayesian-style model averaging over 9 hand-specified Weibull models "
         "(3 shapes × 3 scales). Posterior weights from proxy log-likelihood "
-        "based on calibration at simple runway. BMA output is the "
-        "posterior-weighted average across all model candidates."
+        "based on calibration at simple runway; these are heuristic model weights, "
+        "not calibrated Bayesian evidence."
     )
 
 
@@ -167,4 +168,5 @@ def compute_bma(
         effective_n_models=round(eff_n, 2),
         highest_weight_model_k=top.k,
         highest_weight_model_lambda=top.lambda_,
+        method_status="heuristic",
     )

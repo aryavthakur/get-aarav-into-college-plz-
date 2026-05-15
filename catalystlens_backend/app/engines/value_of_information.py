@@ -14,14 +14,17 @@ Two quantities are computed:
          preposterior) and computing the resulting decision-value improvement.
          Signals are ranked to prioritise diligence spend.
 
-Methodology (Bayesian preposterior):
+Methodology (Bayesian preposterior decision model):
   Current belief: PoS ~ Beta(α, β), posterior_mean = α/(α+β).
-  EV ≈ ev_scale * posterior_mean   (linear approximation).
+  invest_value = posterior_mean * upside_value - capital_required.
+  pass_value = 0.
+  decision_value = max(invest_value, pass_value).
   Observation X ∈ {positive, negative}:
     P(X=+) = α/(α+β) [positive draw more likely if drug works]
     Posterior(+): Beta(α + w, β)
     Posterior(−): Beta(α,     β + w)
-  EVSI_w = P(+)·max(0, EV_after_+) + P(−)·max(0, EV_after_−) − max(0, EV_current)
+  EVSI_w = P(+)·decision_value(Posterior+) + P(−)·decision_value(Posterior−)
+           − decision_value(current)
 
 This is nonzero precisely when the current EV is near the decision threshold and
 a negative signal could flip the investment decision.
@@ -53,41 +56,67 @@ class ValueOfInformationResult:
     per_signal_evsi: List[SignalEVSI]
     top_diligence_priority: str
     total_observable_evsi: float
+    method_status: str = "heuristic"
     methodology_note: str = (
-        "EVPI / EVSI computed under Beta-Binomial preposterior with linear EV approximation. "
-        "Values are positive only when a negative signal could flip the investment decision "
-        "(current EV near zero). Under strongly positive EV, EVPI ≈ 0 is the correct result."
+        "EVPI / EVSI computed under a Beta-Binomial preposterior decision-threshold model. "
+        "invest_value = posterior_pos * upside_value - capital_required; pass_value = 0. "
+        "Values are modeled estimates from uncalibrated signal weights, not validated investment accuracy."
     )
 
 
-def _ev_at_pos(ev_scale: float, alpha: float, beta: float) -> float:
-    """EV given Beta(alpha, beta) posterior under linear approximation."""
-    return ev_scale * alpha / (alpha + beta)
+def _posterior_mean(alpha: float, beta: float) -> float:
+    return alpha / max(alpha + beta, 1e-9)
+
+
+def _infer_decision_inputs(
+    alpha: float,
+    beta: float,
+    financing_adjusted_rnpv: float,
+    upside_value: float | None,
+    capital_required: float | None,
+) -> tuple[float, float]:
+    p = _posterior_mean(alpha, beta)
+    if upside_value is None:
+        if capital_required is None:
+            capital_required = 0.0
+        upside_value = (financing_adjusted_rnpv + capital_required) / max(p, 1e-9)
+    if capital_required is None:
+        capital_required = max(float(upside_value) * p - financing_adjusted_rnpv, 0.0)
+    return max(float(upside_value), 0.0), max(float(capital_required), 0.0)
+
+
+def _invest_value(alpha: float, beta: float, upside_value: float, capital_required: float) -> float:
+    return _posterior_mean(alpha, beta) * upside_value - capital_required
+
+
+def _decision_value(alpha: float, beta: float, upside_value: float, capital_required: float) -> float:
+    return max(_invest_value(alpha, beta, upside_value, capital_required), 0.0)
 
 
 def compute_evpi(
     alpha_posterior: float,
     beta_posterior: float,
     financing_adjusted_rnpv: float,
+    upside_value: float | None = None,
+    capital_required: float | None = None,
 ) -> float:
     """
     Value of learning the trial outcome (success/failure) before committing.
 
-    Models waiting for a single Bernoulli observation drawn from Beta(α,β).
-    EVPI = E_X[max(0, EV_after_X)] - max(0, current_EV).
+    EVPI = E_outcome[max(value if outcome known, pass)] - current decision value.
 
     When EV is strongly positive, the investor invests regardless → EVPI = 0.
     When EV is near zero (borderline), EVPI > 0 because the signal could
     prevent a loss-making investment.
     """
-    p_pos = alpha_posterior / (alpha_posterior + beta_posterior)
-    ev_scale = financing_adjusted_rnpv / max(p_pos, 1e-9)
+    p_pos = _posterior_mean(alpha_posterior, beta_posterior)
+    upside, capital = _infer_decision_inputs(
+        alpha_posterior, beta_posterior, financing_adjusted_rnpv, upside_value, capital_required
+    )
 
-    ev_after_pos = _ev_at_pos(ev_scale, alpha_posterior + 1.0, beta_posterior)
-    ev_after_neg = _ev_at_pos(ev_scale, alpha_posterior, beta_posterior + 1.0)
-
-    preposterior = p_pos * max(0.0, ev_after_pos) + (1.0 - p_pos) * max(0.0, ev_after_neg)
-    return max(0.0, preposterior - max(0.0, financing_adjusted_rnpv))
+    current_decision = _decision_value(alpha_posterior, beta_posterior, upside, capital)
+    perfect_info_value = p_pos * max(upside - capital, 0.0)
+    return max(0.0, perfect_info_value - current_decision)
 
 
 def compute_signal_evsi(
@@ -95,20 +124,25 @@ def compute_signal_evsi(
     beta_posterior: float,
     signal_weight: float,
     financing_adjusted_rnpv: float,
+    upside_value: float | None = None,
+    capital_required: float | None = None,
 ) -> tuple[float, float, float]:
     """
     EVSI for a diligence signal with effective weight signal_weight.
 
     Returns (evsi_dollars, ev_if_positive, ev_if_negative).
     """
-    p_pos = alpha_posterior / (alpha_posterior + beta_posterior)
-    ev_scale = financing_adjusted_rnpv / max(p_pos, 1e-9)
+    p_pos = _posterior_mean(alpha_posterior, beta_posterior)
+    upside, capital = _infer_decision_inputs(
+        alpha_posterior, beta_posterior, financing_adjusted_rnpv, upside_value, capital_required
+    )
 
-    ev_after_pos = _ev_at_pos(ev_scale, alpha_posterior + signal_weight, beta_posterior)
-    ev_after_neg = _ev_at_pos(ev_scale, alpha_posterior, beta_posterior + signal_weight)
+    ev_after_pos = _invest_value(alpha_posterior + signal_weight, beta_posterior, upside, capital)
+    ev_after_neg = _invest_value(alpha_posterior, beta_posterior + signal_weight, upside, capital)
 
     preposterior = p_pos * max(0.0, ev_after_pos) + (1.0 - p_pos) * max(0.0, ev_after_neg)
-    evsi = max(0.0, preposterior - max(0.0, financing_adjusted_rnpv))
+    current_decision = _decision_value(alpha_posterior, beta_posterior, upside, capital)
+    evsi = max(0.0, preposterior - current_decision)
     return evsi, ev_after_pos, ev_after_neg
 
 
@@ -162,13 +196,21 @@ def run_value_of_information_analysis(
     beta_posterior: float,
     financing_adjusted_rnpv: float,
     config_signal_weights: Dict[str, float] | None = None,
+    upside_value: float | None = None,
+    capital_required: float | None = None,
 ) -> ValueOfInformationResult:
     """
     Compute EVPI and per-signal EVSI for diligence prioritization.
 
     config_signal_weights: if supplied, override the default signal catalogue weights.
     """
-    evpi = compute_evpi(alpha_posterior, beta_posterior, financing_adjusted_rnpv)
+    evpi = compute_evpi(
+        alpha_posterior,
+        beta_posterior,
+        financing_adjusted_rnpv,
+        upside_value=upside_value,
+        capital_required=capital_required,
+    )
     ev_abs = abs(financing_adjusted_rnpv) if financing_adjusted_rnpv != 0 else 1.0
     evpi_pct = evpi / ev_abs * 100.0
 
@@ -194,7 +236,12 @@ def run_value_of_information_analysis(
     for sig_name, (desc, cat, default_w) in _SIGNAL_CATALOGUE.items():
         w = float(config_signal_weights.get(sig_name, default_w)) if config_signal_weights else default_w
         evsi_d, ev_pos, ev_neg = compute_signal_evsi(
-            alpha_posterior, beta_posterior, w, financing_adjusted_rnpv
+            alpha_posterior,
+            beta_posterior,
+            w,
+            financing_adjusted_rnpv,
+            upside_value=upside_value,
+            capital_required=capital_required,
         )
         signal_evsis.append(SignalEVSI(
             signal_name=sig_name,
@@ -221,4 +268,5 @@ def run_value_of_information_analysis(
         per_signal_evsi=signal_evsis,
         top_diligence_priority=top_priority,
         total_observable_evsi=round(total_evsi, 2),
+        method_status="heuristic",
     )

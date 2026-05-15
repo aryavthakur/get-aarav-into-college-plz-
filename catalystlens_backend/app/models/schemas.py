@@ -37,6 +37,12 @@ FinancingState = Literal[
 ]
 CashPathState = Literal["continue", "cash_exhaustion", "horizon_reached"]
 SourceType = Literal["sec_filing", "clinicaltrials", "deck", "press_release", "manual_input"]
+MethodStatus = Literal[
+    "calibrated",
+    "uncalibrated_assumption",
+    "heuristic",
+    "experimental_scaffold",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +491,7 @@ class FinalSummaryResult(BaseModel):
 
 
 class StateSpaceResult(BaseModel):
-    """Bayesian state-space model output from particle filter."""
+    """Experimental state-space scaffold output."""
     cash_health_score: float = Field(ge=0.0, le=1.0)
     burn_acceleration_signal: float = Field(ge=0.0, le=1.0)
     clinical_progress_signal: float = Field(ge=0.0, le=1.0)
@@ -497,10 +503,11 @@ class StateSpaceResult(BaseModel):
     effective_sample_size: float
     interpretation: str
     methodology_note: str
+    method_status: MethodStatus = "experimental_scaffold"
 
 
 class RobustnessResult(BaseModel):
-    """Wasserstein-ball DRO bounds on cashout probability and EV."""
+    """Variance-scaled distributional sensitivity bounds on cashout probability and EV."""
     nominal_cashout_prob: float
     nominal_ev: float
     worst_case_cashout_prob_e05: float
@@ -513,6 +520,7 @@ class RobustnessResult(BaseModel):
     best_case_ev_e10: float
     robustness_interpretation: str
     methodology_note: str
+    method_status: MethodStatus = "heuristic"
 
 
 class ModelWeightSchema(BaseModel):
@@ -524,7 +532,7 @@ class ModelWeightSchema(BaseModel):
 
 
 class BMAResult(BaseModel):
-    """Bayesian model averaging over Weibull model candidates."""
+    """Proxy Bayesian-style model averaging over Weibull model candidates."""
     bma_cashout_prob: float
     bma_ev: float
     model_weights: List[ModelWeightSchema]
@@ -532,6 +540,7 @@ class BMAResult(BaseModel):
     highest_weight_model_k: float
     highest_weight_model_lambda: float
     methodology_note: str
+    method_status: MethodStatus = "heuristic"
 
 
 class DependenceAnalysisResult(BaseModel):
@@ -544,6 +553,7 @@ class DependenceAnalysisResult(BaseModel):
     negative_rho_dependence_effect: float
     negative_rho_interpretation: str
     methodology_note: str
+    method_status: MethodStatus = "heuristic"
 
 
 class RealOptionsResult(BaseModel):
@@ -556,7 +566,9 @@ class RealOptionsResult(BaseModel):
     real_options_premium: float
     real_options_premium_pct: float
     abandonment_value: float
+    financing_adjusted_rov: float = 0.0
     model_assumptions: List[str]
+    method_status: MethodStatus = "experimental_scaffold"
 
 
 class ShapleyComponentSchema(BaseModel):
@@ -568,13 +580,14 @@ class ShapleyComponentSchema(BaseModel):
 
 
 class RiskAttributionResult(BaseModel):
-    """Shapley-based decomposition of cashout probability and EV uncertainty."""
+    """Shapley-style sensitivity decomposition of cashout probability and EV uncertainty."""
     components: List[ShapleyComponentSchema]
     total_cashout_prob: float
     total_ev: float
     explained_cashout_prob: float
     explained_ev: float
     methodology_note: str
+    method_status: MethodStatus = "heuristic"
 
 
 class MultiStateResult(BaseModel):
@@ -596,6 +609,7 @@ class MultiStateResult(BaseModel):
         None, description="S(catalyst_month): probability of being in operating state at catalyst",
     )
     model_assumptions: List[str] = Field(default_factory=list)
+    method_status: MethodStatus = "uncalibrated_assumption"
 
 
 class SignalEVSISchema(BaseModel):
@@ -618,6 +632,7 @@ class ValueOfInformationResult(BaseModel):
     top_diligence_priority: str
     total_observable_evsi: float
     methodology_note: str
+    method_status: MethodStatus = "heuristic"
 
 
 class DataQualityResult(BaseModel):
