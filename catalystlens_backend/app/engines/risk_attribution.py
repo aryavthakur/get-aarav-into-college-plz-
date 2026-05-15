@@ -1,5 +1,5 @@
 """
-Shapley-based risk attribution for CatalystLens.
+Shapley-style sensitivity attribution for CatalystLens.
 
 Decomposes the total cashout probability and EV uncertainty into additive
 contributions from each major risk driver using a Shapley-value approximation.
@@ -46,6 +46,7 @@ class RiskAttributionResult:
     explained_cashout_prob: float
     explained_ev: float
     methodology_note: str
+    method_status: str = "heuristic"
 
 
 def _build_simulator(
@@ -122,6 +123,7 @@ def compute_shapley_attribution(
             explained_cashout_prob=0.0,
             explained_ev=0.0,
             methodology_note="No sensitivity rows available for Shapley decomposition.",
+            method_status="heuristic",
         )
 
     value_fn = _build_simulator(total_cashout_prob, total_ev, sensitivity_rows)
@@ -181,9 +183,10 @@ def compute_shapley_attribution(
         explained_cashout_prob=round(explained_cp, 4),
         explained_ev=round(explained_ev, 2),
         methodology_note=(
-            "Shapley values computed using Owen random-order estimator "
+            "Shapley-style sensitivity attribution computed using an Owen random-order estimator "
             f"({n_permutations} permutations). Driver contributions are proportional "
-            "to sensitivity analysis ranges — a first-order approximation. "
+            "to sensitivity analysis ranges — a sensitivity-based approximation. "
             "True Shapley would require re-running the full simulation for each coalition."
         ),
+        method_status="heuristic",
     )

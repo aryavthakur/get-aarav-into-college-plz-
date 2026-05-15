@@ -55,6 +55,12 @@ class TestDROUnit:
         r = self._base()
         assert len(r.robustness_interpretation) > 10
 
+    def test_methodology_does_not_overclaim_wasserstein_optimization(self):
+        r = self._base()
+        note = r.methodology_note.lower()
+        assert "wasserstein" not in note
+        assert "variance-scaled distributional sensitivity bounds" in note
+
 
 # ---------------------------------------------------------------------------
 # Bayesian model averaging
@@ -98,6 +104,11 @@ class TestBMAUnit:
         top_long = max(r_long.model_weights, key=lambda m: m.posterior_weight)
         # Short runway → higher lambda models preferred
         assert top_short.lambda_ >= top_long.lambda_ - 0.01
+
+    def test_methodology_discloses_proxy_or_heuristic_bma(self):
+        r = compute_bma(simple_runway=12.0, risk_multiplier=1.2,
+                        base_cashout_prob=0.40, base_ev=30_000_000)
+        assert "proxy" in r.methodology_note.lower() or "heuristic" in r.methodology_note.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +157,31 @@ class TestCopulaUnit:
         assert r.positive_rho.dependence_effect == pytest.approx(
             r.positive_rho.copula_cashout_prob - r.positive_rho.independent_cashout_prob, abs=0.001
         )
+
+    def test_base_cashout_prob_uses_original_pairing(self):
+        t_fin = np.array([1.0, 100.0, 2.0, 100.0])
+        t_sci = np.array([50.0, 50.0, 1.0, 1.0])
+
+        r = run_dependence_analysis(t_fin, t_sci, np.random.default_rng(9))
+
+        assert r.base_cashout_prob == pytest.approx(float(np.mean(t_fin < t_sci)))
+
+    def test_copula_independent_baseline_matches_original_not_sorted_pairing(self):
+        original_t_fin = np.array([1.0, 100.0, 2.0, 100.0])
+        original_t_sci = np.array([50.0, 50.0, 1.0, 1.0])
+        sorted_pair_baseline = float(np.mean(np.sort(original_t_fin) < np.sort(original_t_sci)))
+        original_baseline = float(np.mean(original_t_fin < original_t_sci))
+
+        r = simulate_with_copula(
+            np.sort(original_t_fin),
+            np.sort(original_t_sci),
+            np.random.default_rng(10),
+            rho=0.30,
+            original_base_cashout=original_baseline,
+        )
+
+        assert sorted_pair_baseline != original_baseline
+        assert r.independent_cashout_prob == pytest.approx(original_baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -212,3 +248,27 @@ class TestAdvancedMathIntegration:
         r = run_full_audit(self._request())
         total = sum(mw.posterior_weight for mw in r.bma.model_weights)
         assert abs(total - 1.0) < 0.01
+
+    def test_advanced_results_include_method_status(self):
+        r = run_full_audit(self._request())
+        advanced_results = [
+            r.value_of_information,
+            r.real_options,
+            r.risk_attribution,
+            r.robustness,
+            r.bma,
+            r.dependence,
+            r.state_space,
+        ]
+
+        for result in advanced_results:
+            assert result.method_status in {
+                "calibrated",
+                "uncalibrated_assumption",
+                "heuristic",
+                "experimental_scaffold",
+            }
+
+    def test_report_displays_method_status(self):
+        r = run_full_audit(self._request())
+        assert "Method Status" in r.markdown_report

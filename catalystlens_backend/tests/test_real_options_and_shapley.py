@@ -50,6 +50,56 @@ class TestRealOptionsUnit:
         r = self._run()
         assert r.abandonment_value >= 0.0
 
+    def test_abandonment_value_positive_when_exercise_would_destroy_value(self):
+        r = self._run(K=260_000_000, sigma=0.20, seed=123)
+        assert r.abandonment_value > 0.0
+
+    def test_abandonment_value_zero_when_exercise_cost_zero(self):
+        r = self._run(K=0.0, seed=123)
+        assert r.abandonment_value == pytest.approx(0.0, abs=1.0)
+
+    def test_financing_distress_reduces_adjusted_rov(self):
+        base = self._run(K=30_000_000, seed=5)
+        rng = np.random.default_rng(5)
+        t_sci = rng.gamma(shape=4.0, scale=4.0, size=2000)
+        pos = rng.beta(a=3.0, b=7.0, size=2000)
+        stressed = simulate_real_options_value(
+            t_sci,
+            pos,
+            RealOptionsInput(
+                asset_value_success=200_000_000,
+                exercise_cost=30_000_000,
+                financing_state_probabilities={
+                    "funded": 0.10,
+                    "clean_refinancing": 0.10,
+                    "distressed_refinancing": 0.30,
+                    "program_discontinuation": 0.50,
+                },
+            ),
+            np.random.default_rng(6),
+        )
+        assert stressed.financing_adjusted_rov < base.rov_mean
+
+    def test_partnership_retained_economics_lowers_but_preserves_rov(self):
+        rng = np.random.default_rng(6)
+        t_sci = rng.gamma(shape=4.0, scale=4.0, size=2000)
+        pos = rng.beta(a=3.0, b=7.0, size=2000)
+        r = simulate_real_options_value(
+            t_sci,
+            pos,
+            RealOptionsInput(
+                asset_value_success=200_000_000,
+                exercise_cost=30_000_000,
+                financing_state_probabilities={
+                    "funded": 0.20,
+                    "partnership": 0.80,
+                },
+                partnership_retained_economics=0.45,
+            ),
+            np.random.default_rng(7),
+        )
+        assert 0.0 < r.financing_adjusted_rov < r.rov_mean
+
     def test_rov_ge_rnpv_when_no_exercise_cost(self):
         """ROV ≥ rNPV when K=0 (option value ≥ intrinsic value)."""
         r = self._run(K=0.0)
@@ -119,6 +169,12 @@ class TestShapleyUnit:
         rows = self._make_sensitivity_rows()
         r = compute_shapley_attribution(rows, 0.40, 40_000_000)
         assert len(r.methodology_note) > 10
+
+    def test_methodology_note_is_sensitivity_based_approximation(self):
+        rows = self._make_sensitivity_rows()
+        r = compute_shapley_attribution(rows, 0.40, 40_000_000)
+        note = r.methodology_note.lower()
+        assert "sensitivity-based" in note or "approximation" in note
 
 
 # ---------------------------------------------------------------------------

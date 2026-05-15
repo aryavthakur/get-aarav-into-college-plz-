@@ -1,26 +1,15 @@
 """
-Distributionally Robust Optimization (DRO) for CatalystLens.
+Variance-scaled distributional sensitivity bounds for CatalystLens.
 
-Computes Wasserstein-ball worst-case bounds on cashout probability and EV.
-Instead of assuming the model's parameter distributions are exactly correct,
-DRO hedges against nearby distributions within an epsilon-ball.
+This module does not solve a formal Wasserstein ambiguity-set optimization.
+It computes heuristic sensitivity bounds around nominal cashout probability and
+EV using variance-scaled perturbations.
 
-Method: Variance-based worst-case bounds (tractable closed form).
-
-For a random variable X with mean mu and variance sigma^2, the worst-case
-expectation of a convex functional within a Wasserstein epsilon-ball is:
-
-  E_worst[f(X)] ≤ f(mu) + epsilon * Lip(f) + sqrt(Var(X)) * phi(epsilon)
-
-For a monotone 0/1 indicator (cashout event), the worst-case probability
-under distributional uncertainty is bounded by:
+For a monotone 0/1 indicator (cashout event), the heuristic adverse probability
+bound is:
 
   P_worst(cashout) ≤ P_nominal(cashout) + epsilon * sqrt(Var(1[cashout]))
                    = P_nominal + epsilon * sqrt(P(1-P))
-
-This is the Cantelli-DRO bound. It quantifies how much the cashout probability
-could deviate from the model estimate if the true distribution is within epsilon
-of the fitted model in 2-Wasserstein distance.
 
 Practical interpretation:
   epsilon=0.05: minor distributional misspecification (parameter uncertainty)
@@ -40,7 +29,7 @@ class RobustnessResult:
     nominal_cashout_prob: float
     nominal_ev: float
 
-    # Wasserstein worst-case bounds
+    # Variance-scaled adverse-case bounds
     worst_case_cashout_prob_e05: float
     worst_case_cashout_prob_e10: float
     worst_case_cashout_prob_e20: float
@@ -54,10 +43,11 @@ class RobustnessResult:
     best_case_ev_e10: float
 
     robustness_interpretation: str
+    method_status: str = "heuristic"
     methodology_note: str = (
-        "Wasserstein-ball DRO bounds via Cantelli inequality. "
-        "Epsilon = 2-Wasserstein radius as fraction of distributional spread. "
-        "Worst-case EV uses variance-scaled bound: E_worst = E_nominal - epsilon * std(V)."
+        "Variance-scaled distributional sensitivity bounds. "
+        "Epsilon is a heuristic perturbation multiplier, not an optimized ambiguity-set radius. "
+        "Adverse EV uses E_adverse = E_nominal - epsilon * std(V)."
     )
 
 
@@ -70,7 +60,7 @@ def compute_robustness_bounds(
     ev_samples: np.ndarray | None = None,
 ) -> RobustnessResult:
     """
-    Compute distributional-robustness bounds for cashout probability and EV.
+    Compute variance-scaled distributional sensitivity bounds for cashout probability and EV.
 
     Parameters
     ----------
@@ -152,4 +142,5 @@ def compute_robustness_bounds(
         best_case_cashout_prob_e10=round(bc10, 4),
         best_case_ev_e10=round(be10, 2),
         robustness_interpretation=interp,
+        method_status="heuristic",
     )

@@ -85,8 +85,9 @@ class StateSpaceResult:
     market_condition_signal: float  # z[3] normalised to [0, 1]
     anomaly_score: float            # 1 - ESS/n_particles; high → surprising observations
     interpretation: str
+    method_status: str = "experimental_scaffold"
     methodology_note: str = (
-        "Bootstrap particle filter with 1000 particles. "
+        "Experimental state-space scaffold using a bootstrap particle-filter-style update with 1000 particles. "
         "Latent state z_t: [log_runway, burn_trend, clinical_progress, market_condition]. "
         "Observation likelihood via Gaussian with sigma=0.20. "
         "Anomaly score = 1 - ESS/N; high values indicate inputs inconsistent with prior."
@@ -315,4 +316,5 @@ def run_state_space_analysis(
         market_condition_signal=round(mkt_norm, 3),
         anomaly_score=round(anomaly, 3),
         interpretation=interp,
+        method_status="experimental_scaffold",
     )

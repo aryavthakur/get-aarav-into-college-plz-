@@ -937,6 +937,7 @@ def _value_of_information_section(r: AuditResponse) -> str:
 
 | Metric | Value |
 |---|---:|
+| Method Status | {voi.method_status} |
 | EVPI (perfect clinical outcome info) | {_fmt_m(voi.evpi_dollars)} ({voi.evpi_pct_of_ev:.1f}% of EV) |
 | Top diligence signal | {voi.top_diligence_priority} |
 | Total EVSI across all signals | {_fmt_m(voi.total_observable_evsi)} |
@@ -961,11 +962,13 @@ def _robustness_section(r: AuditResponse) -> str:
     if rob is None:
         return ""
 
-    return f"""## Y. Distributional Robustness (Wasserstein DRO)
+    return f"""## Y. Distributional Robustness: Sensitivity Bounds
 
 {rob.robustness_interpretation}
 
-| Wasserstein Epsilon | Worst-Case Cashout Prob | Worst-Case EV |
+| Method Status | {rob.method_status} |
+
+| Perturbation Epsilon | Adverse-Case Cashout Prob | Adverse-Case EV |
 |---|---:|---:|
 | ε = 0.05 (minor misspecification) | {rob.worst_case_cashout_prob_e05:.1%} | {_fmt_m(rob.worst_case_ev_e05)} |
 | ε = 0.10 (moderate misspecification) | {rob.worst_case_cashout_prob_e10:.1%} | {_fmt_m(rob.worst_case_ev_e10)} |
@@ -990,10 +993,12 @@ def _bma_section(r: AuditResponse) -> str:
         for mw in bma.model_weights[:5]
     )
 
-    return f"""## Z. Bayesian Model Averaging
+    return f"""## Z. Proxy Bayesian Model Averaging
 
-BMA-averaged cashout probability: **{bma.bma_cashout_prob:.1%}** (vs nominal from single model).
-BMA-averaged EV: **{_fmt_m(bma.bma_ev)}**
+Method Status: **{bma.method_status}**
+
+Model-averaged cashout probability: **{bma.bma_cashout_prob:.1%}** (vs nominal from single model).
+Model-averaged EV: **{_fmt_m(bma.bma_ev)}**
 Effective number of models (posterior entropy): **{bma.effective_n_models:.1f}** of 9 candidates.
 
 ### Top-5 Model Weights
@@ -1017,6 +1022,7 @@ def _dependence_section(r: AuditResponse) -> str:
     return f"""## AA. Copula Dependence Analysis
 
 Base cashout probability (independence): **{dep.base_cashout_prob:.1%}**
+Method Status: **{dep.method_status}**
 
 | Scenario | Rho | Copula Cashout Prob | Effect |
 |---|---:|---:|---:|
@@ -1050,7 +1056,9 @@ def _state_space_section(r: AuditResponse) -> str:
 
     return f"""## BB. Bayesian State-Space Model
 
-Bootstrap particle filter (1000 particles) over latent company health state.{anomaly_note}
+Experimental particle-filter-style scaffold (1000 particles) over latent company health state.{anomaly_note}
+
+Method Status: **{ss.method_status}**
 
 | Dimension | Score | Bar |
 |---|---:|---|
@@ -1087,7 +1095,9 @@ value following GBM with sigma={60:.0f}%.
 
 | Metric | Value |
 |---|---:|
+| Method Status | {ro.method_status} |
 | ROV Mean | {_fmt_m(ro.rov_mean)} |
+| Financing-Adjusted ROV | {_fmt_m(ro.financing_adjusted_rov)} |
 | ROV Median | {_fmt_m(ro.rov_median)} |
 | ROV P5 / P95 | {_fmt_m(ro.rov_p5)} / {_fmt_m(ro.rov_p95)} |
 | Static rNPV (PoS × V × discount) | {_fmt_m(ro.rnpv_static)} |
@@ -1120,7 +1130,9 @@ def _risk_attribution_section(r: AuditResponse) -> str:
 
     return f"""## X. Shapley Risk Attribution
 
-Approximate Shapley decomposition of cashout probability and EV uncertainty
+Method Status: **{ra.method_status}**
+
+Sensitivity-based approximation of cashout probability and EV uncertainty
 across the {len(ra.components)} primary risk drivers.
 
 | Rank | Driver | Description | Cashout Prob Contribution | EV Contribution |
@@ -1140,7 +1152,9 @@ across the {len(ra.components)} primary risk drivers.
 def _multistate_section(r: AuditResponse) -> str:
     ms = r.multi_state
     if ms is None:
-        return ""
+        return """## V. Multi-State Competing-Risk Analysis
+
+Multi-state engine available but not active for this audit."""
 
     state_rows = "\n".join(
         f"| {name.replace('_', ' ').title()} | {prob:.1%} |"
@@ -1166,6 +1180,10 @@ def _multistate_section(r: AuditResponse) -> str:
     assumptions = "\n".join(f"- {a}" for a in (ms.model_assumptions or []))
 
     return f"""## V. Multi-State Competing-Risk Analysis
+
+Method Status: **{ms.method_status}**
+
+Parameters are untrained MVP assumptions unless a calibrated artifact is registered.
 
 ### Absorbing State Probabilities (by Horizon End)
 

@@ -52,6 +52,40 @@ class TestEVPI:
         # (not strict inequality in all cases but generally holds for borderline EVs)
         assert evpi_diffuse >= evpi_concentrate - 1.0
 
+    def test_decision_evpi_positive_when_borderline(self):
+        """Perfect information has value when current invest/pass decision is near threshold."""
+        evpi = compute_evpi(
+            alpha_posterior=5.0,
+            beta_posterior=5.0,
+            financing_adjusted_rnpv=0.0,
+            upside_value=100_000_000,
+            capital_required=50_000_000,
+        )
+
+        assert evpi > 0.0
+
+    def test_decision_evpi_near_zero_when_strongly_positive(self):
+        evpi = compute_evpi(
+            alpha_posterior=9.0,
+            beta_posterior=1.0,
+            financing_adjusted_rnpv=0.0,
+            upside_value=100_000_000,
+            capital_required=1_000_000,
+        )
+
+        assert evpi <= 1_000_000
+
+    def test_decision_evpi_near_zero_when_strongly_negative(self):
+        evpi = compute_evpi(
+            alpha_posterior=1.0,
+            beta_posterior=9.0,
+            financing_adjusted_rnpv=0.0,
+            upside_value=100_000_000,
+            capital_required=99_000_000,
+        )
+
+        assert evpi <= 1_000_000
+
 
 # ---------------------------------------------------------------------------
 # Unit tests for EVSI
@@ -67,7 +101,13 @@ class TestEVSI:
 
     def test_heavier_signal_has_higher_evsi(self):
         """Stronger signal (higher weight) has at least as much EVSI."""
-        kwargs = dict(alpha_posterior=3.0, beta_posterior=7.0, financing_adjusted_rnpv=2_000_000)
+        kwargs = dict(
+            alpha_posterior=5.0,
+            beta_posterior=5.0,
+            financing_adjusted_rnpv=0.0,
+            upside_value=100_000_000,
+            capital_required=51_000_000,
+        )
         evsi_weak, _, _ = compute_signal_evsi(signal_weight=0.5, **kwargs)
         evsi_strong, _, _ = compute_signal_evsi(signal_weight=2.0, **kwargs)
         assert evsi_strong >= evsi_weak

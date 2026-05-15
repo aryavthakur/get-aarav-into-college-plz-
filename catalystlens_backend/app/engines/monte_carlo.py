@@ -1106,6 +1106,7 @@ def run_full_audit(
                 "Cause LPs derived from aggregate Cox LP via differential weighting.",
                 "Scale parameters are MVP defaults; not fit to historical outcome data.",
             ],
+            method_status="uncalibrated_assumption",
         )
 
     # ---- Step 13: Value of Information ----
@@ -1113,6 +1114,8 @@ def run_full_audit(
         alpha_posterior=pos_result.alpha_posterior,
         beta_posterior=pos_result.beta_posterior,
         financing_adjusted_rnpv=val_result.financing_adjusted_rnpv,
+        upside_value=float(valuation.asset_value_success),
+        capital_required=max(float(cash_path_result.capital_needed_to_reach_catalyst or 0.0), 0.0),
     )
     voi_result = ValueOfInformationResult(
         evpi_dollars=voi_raw.evpi_dollars,
@@ -1134,6 +1137,7 @@ def run_full_audit(
         top_diligence_priority=voi_raw.top_diligence_priority,
         total_observable_evsi=voi_raw.total_observable_evsi,
         methodology_note=voi_raw.methodology_note,
+        method_status=voi_raw.method_status,
     )
 
     # ---- Step 14: Real-options valuation ----
@@ -1144,6 +1148,14 @@ def run_full_audit(
         asset_volatility=0.60,
         annual_discount_rate=float(valuation.annual_discount_rate),
         pos_mean=float(pos_result.posterior_mean),
+        financing_state_probabilities={
+            "funded": val_result.p_funded_through_catalyst,
+            "clean_refinancing": val_result.p_refinancing_success,
+            "distressed_refinancing": val_result.p_distressed_financing,
+            "program_discontinuation": val_result.p_program_discontinuation,
+        },
+        clean_refinancing_dilution=float(valuation.expected_dilution_if_refinanced),
+        distressed_refinancing_dilution=min(float(valuation.expected_dilution_if_refinanced) * 2.0, 1.0),
     )
     ro_raw = simulate_real_options_value(t_sci, pos_samples, ro_input, ro_rng)
     real_options_result = RealOptionsResult(
@@ -1155,7 +1167,9 @@ def run_full_audit(
         real_options_premium=ro_raw.real_options_premium,
         real_options_premium_pct=ro_raw.real_options_premium_pct,
         abandonment_value=ro_raw.abandonment_value,
+        financing_adjusted_rov=ro_raw.financing_adjusted_rov,
         model_assumptions=ro_raw.model_assumptions,
+        method_status=ro_raw.method_status,
     )
 
     # ---- Step 15: Shapley risk attribution ----
@@ -1183,6 +1197,7 @@ def run_full_audit(
         explained_cashout_prob=shapley_raw.explained_cashout_prob,
         explained_ev=shapley_raw.explained_ev,
         methodology_note=shapley_raw.methodology_note,
+        method_status=shapley_raw.method_status,
     )
 
     # ---- Step 16: Distributional robustness ----
@@ -1206,6 +1221,7 @@ def run_full_audit(
         best_case_ev_e10=robustness_raw.best_case_ev_e10,
         robustness_interpretation=robustness_raw.robustness_interpretation,
         methodology_note=robustness_raw.methodology_note,
+        method_status=robustness_raw.method_status,
     )
 
     # ---- Step 17: Bayesian model averaging ----
@@ -1234,6 +1250,7 @@ def run_full_audit(
         highest_weight_model_k=bma_raw.highest_weight_model_k,
         highest_weight_model_lambda=bma_raw.highest_weight_model_lambda,
         methodology_note=bma_raw.methodology_note,
+        method_status=bma_raw.method_status,
     )
 
     # ---- Step 18: Copula dependence analysis ----
@@ -1248,6 +1265,7 @@ def run_full_audit(
         negative_rho_dependence_effect=dep_raw.negative_dependence_effect,
         negative_rho_interpretation=dep_raw.negative_interpretation,
         methodology_note=dep_raw.methodology_note,
+        method_status=dep_raw.method_status,
     )
 
     # ---- Step 19: Bayesian state-space model ----
@@ -1276,6 +1294,7 @@ def run_full_audit(
         effective_sample_size=ss_raw.current_state_estimate.effective_sample_size,
         interpretation=ss_raw.interpretation,
         methodology_note=ss_raw.methodology_note,
+        method_status=ss_raw.method_status,
     )
 
     # ---- Step 20: Report ----
