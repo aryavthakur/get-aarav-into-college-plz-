@@ -32,11 +32,19 @@ from app.models.schemas import ClinicalCatalystInput, MilestoneTimingResult
 
 _STATUS_DELAY_MULTIPLIER = {
     "not_yet_recruiting": 1.30,
+    "enrolling_by_invitation": 1.15,
     "recruiting": 1.10,
     "active_not_recruiting": 1.05,
     "completed": 1.00,
     "suspended": 1.50,
     "withdrawn": 1.80,
+    "terminated": 1.80,
+    "available": 1.10,
+    "no_longer_available": 1.30,
+    "temporarily_not_available": 1.50,
+    "approved_for_marketing": 1.00,
+    "withheld": 1.60,
+    "unknown": 1.25,
 }
 
 

@@ -23,6 +23,7 @@ import numpy as np
 from scipy import stats
 
 from app.core.config import CatalystLensConfig, get_default_config
+from app.engines.hierarchical_pos import lookup_hierarchical_prior
 from app.models.schemas import SuccessProbabilityInput, SuccessProbabilityResult
 
 
@@ -132,12 +133,28 @@ def run_success_probability_analysis(
     if config is None:
         config = get_default_config()
 
-    alpha_prior, beta_prior = build_success_prior_by_phase(
-        inputs.trial_phase,
-        config,
-        inputs.custom_alpha_prior,
-        inputs.custom_beta_prior,
-    )
+    prior_source = "mvp_phase_prior"
+    prior_confidence = 0.35
+    prior_fallback_level = "phase_only"
+    if inputs.custom_alpha_prior is not None and inputs.custom_beta_prior is not None:
+        alpha_prior, beta_prior = inputs.custom_alpha_prior, inputs.custom_beta_prior
+        prior_source = "custom_user_prior"
+        prior_confidence = 0.25
+        prior_fallback_level = "custom"
+    elif inputs.disease_area or inputs.modality or inputs.endpoint_family:
+        prior = lookup_hierarchical_prior(
+            inputs.trial_phase,
+            inputs.disease_area,
+            inputs.modality,
+            inputs.endpoint_family,
+            config,
+        )
+        alpha_prior, beta_prior = prior.alpha, prior.beta
+        prior_source = prior.prior_source
+        prior_confidence = prior.prior_confidence
+        prior_fallback_level = prior.fallback_level
+    else:
+        alpha_prior, beta_prior = build_success_prior_by_phase(inputs.trial_phase, config)
 
     alpha_post, beta_post, pos_weights, neg_weights = update_beta_posterior(
         alpha_prior, beta_prior,
@@ -161,10 +178,13 @@ def run_success_probability_analysis(
         credible_interval_pct=90.0,
         applied_positive_weights={k: round(v, 3) for k, v in pos_weights.items()},
         applied_negative_weights={k: round(v, 3) for k, v in neg_weights.items()},
+        prior_source=prior_source,
+        prior_confidence=round(prior_confidence, 3),
+        prior_fallback_level=prior_fallback_level,
         model_assumptions=[
             "Beta-binomial Bayesian model with additive signal weight updates.",
             "Signal weights are UNTRAINED MVP ASSUMPTIONS (see config.py).",
-            "Phase-specific priors encode historical industry PoS rates directionally.",
+            "Hierarchical priors are used when phase/disease/modality/endpoint strata are supplied.",
             "Posterior PoS is a model estimate, not a validated prediction of approval.",
             "Unknown signals are neither positive nor negative (absent from update).",
         ],

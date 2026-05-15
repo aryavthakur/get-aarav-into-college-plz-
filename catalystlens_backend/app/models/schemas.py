@@ -15,7 +15,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 TrialPhase = Literal["preclinical", "phase_1", "phase_2", "phase_3", "filed", "approved"]
 TrialStatus = Literal[
     "not_yet_recruiting", "recruiting", "active_not_recruiting",
-    "completed", "suspended", "withdrawn",
+    "completed", "suspended", "withdrawn", "terminated",
+    "enrolling_by_invitation", "available", "no_longer_available",
+    "temporarily_not_available", "approved_for_marketing", "withheld",
+    "unknown",
 ]
 CatalystType = Literal[
     "phase_completion", "interim_analysis", "primary_readout",
@@ -57,6 +60,10 @@ class CompanyFinancialInput(BaseModel):
     pipeline_concentration_score: float = Field(
         0.5, ge=0.0, le=1.0,
         description="0=diversified pipeline, 1=single-asset company",
+    )
+    planned_financing_events: List["FinancingEventInput"] = Field(
+        default_factory=list,
+        description="Planned or assumed financing inflows for mechanical cash-path simulation",
     )
 
     @field_validator("cash_on_hand", "marketable_securities", "quarterly_operating_cash_burn")
@@ -262,6 +269,10 @@ class CashPathInput(BaseModel):
         description="Lognormal monthly burn volatility; 0 keeps burn deterministic.",
     )
     financing_events: List[FinancingEventInput] = Field(default_factory=list)
+    catalyst_month: Optional[float] = Field(
+        None, ge=0,
+        description="Optional catalyst/public-readout month for capital-needed-to-catalyst calculation",
+    )
 
 
 class CashPathMonth(BaseModel):
@@ -280,6 +291,10 @@ class CashPathResult(BaseModel):
     ending_cash: float
     total_burn: float
     total_capital_raised: float
+    cash_shortfall_at_exhaustion: float = 0.0
+    maximum_cash_deficit: float = 0.0
+    capital_needed_to_survive_horizon: float = 0.0
+    capital_needed_to_reach_catalyst: Optional[float] = None
     monthly_balances: List[CashPathMonth]
 
 
@@ -321,6 +336,9 @@ class SuccessProbabilityResult(BaseModel):
     credible_interval_pct: float
     applied_positive_weights: Dict[str, float]
     applied_negative_weights: Dict[str, float]
+    prior_source: str = "mvp_phase_prior"
+    prior_confidence: float = 0.35
+    prior_fallback_level: str = "phase_only"
     model_assumptions: List[str]
 
 

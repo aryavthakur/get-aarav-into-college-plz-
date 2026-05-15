@@ -773,6 +773,117 @@ def _data_quality_section(r: AuditResponse) -> str:
 > directional indicators only."""
 
 
+def _model_validation_section(r: AuditResponse) -> str:
+    v = r.validation_snapshot
+    unavailable = (
+        "\n\n> **Calibration warning:** Historical labeled datasets and frozen trained "
+        "artifacts are not available for this run. Validation metrics are therefore "
+        "reported as unavailable, and outputs remain assumption-based model estimates."
+        if v.solvency_calibration_status == "research_mode" else ""
+    )
+
+    return f"""## Q. Model Validation Status
+
+| Metric | Value |
+|---|---:|
+| Solvency Calibration Status | {v.solvency_calibration_status} |
+| IPCW C-Index | {v.solvency_c_index_ipcw if v.solvency_c_index_ipcw is not None else "Unavailable"} |
+| Integrated Brier Score | {v.solvency_integrated_brier_score if v.solvency_integrated_brier_score is not None else "Unavailable"} |
+| ICI / 12-Month Calibration Error | {v.solvency_ici_12m if v.solvency_ici_12m is not None else "Unavailable"} |
+| PoS Posterior Predictive Check | {v.pos_ppc_status} |
+| Timing Coverage Check | {v.timing_interval_coverage_status} |
+
+{unavailable}"""
+
+
+def _financial_clock_decomposition_section(r: AuditResponse) -> str:
+    sol = r.solvency
+    cash = r.cash_path
+    val = r.valuation
+
+    return f"""## R. Financial Clock Decomposition
+
+| Component | Value | Interpretation |
+|---|---:|---|
+| Simple Runway | {_fmt_months(sol.simple_runway_months)} | Static liquidity / current monthly burn |
+| Cox-Weibull Median Failure Time | {_fmt_months(sol.median_failure_time)} | Hazard-model financing survival clock |
+| Mechanical Cash Exhaustion Month | {cash.cash_exhaustion_month if cash.cash_exhaustion_month is not None else "Not reached"} | Literal monthly cash-balance exhaustion |
+| Cash Shortfall at Exhaustion | {_fmt_m(cash.cash_shortfall_at_exhaustion)} | True deficit in exhaustion month before clipping |
+| Maximum Cash Deficit | {_fmt_m(cash.maximum_cash_deficit)} | Peak cumulative deficit over simulated horizon |
+| Capital Needed to Survive Horizon | {_fmt_m(cash.capital_needed_to_survive_horizon)} | Capital required to avoid negative cash through horizon |
+| Cash Path Final State | {cash.final_state.replace("_", " ").title()} | Mechanical cash-path endpoint |
+| Funded Through Catalyst | {_fmt_pct(val.p_funded_through_catalyst)} | Four-state valuation probability |
+| Clean Refinancing | {_fmt_pct(val.p_refinancing_success)} | Four-state valuation probability |
+| Distressed Financing | {_fmt_pct(val.p_distressed_financing)} | Four-state valuation probability |
+| Program Discontinuation | {_fmt_pct(val.p_program_discontinuation)} | Four-state valuation probability |"""
+
+
+def _planned_financing_section(req: AuditRequest, r: AuditResponse) -> str:
+    events = req.financial.planned_financing_events
+    if not events:
+        return "## S. Planned Financing Events\n\n_No planned financing events supplied._"
+
+    rows = ""
+    for event in events:
+        rows += (
+            f"| {event.month} | {event.kind.replace('_', ' ').title()} "
+            f"| {_fmt_m(event.gross_proceeds)} | {_fmt_m(event.net_proceeds)} |\n"
+        )
+    exhaustion = (
+        str(r.cash_path.cash_exhaustion_month)
+        if r.cash_path.cash_exhaustion_month is not None else "Not reached"
+    )
+    return f"""## S. Planned Financing Events
+
+| Month | Kind | Gross Proceeds | Net Proceeds |
+|---:|---|---:|---:|
+{rows}
+
+**Effect on mechanical cash exhaustion month:** {exhaustion}"""
+
+
+def _provenance_appendix(r: AuditResponse) -> str:
+    p = r.provenance
+
+    def _rows(items) -> str:
+        if not items:
+            return "| _(None)_ | — | — | — | — |\n"
+        return "".join(
+            f"| {item.field} | {item.value} | {item.evidence.source_type} "
+            f"| {item.evidence.source_id} | {item.evidence.locator or 'manual'} |\n"
+            for item in items
+        )
+
+    manual_warning = (
+        "\n\n> **Manual input warning:** manual inputs are unverified because no source-traced "
+        "SEC, ClinicalTrials.gov, deck, or press-release evidence was attached."
+        if p.provenance_status == "manual_inputs_unverified" else ""
+    )
+
+    return f"""## T. Provenance Appendix
+
+**Provenance Status:** {p.provenance_status}
+{manual_warning}
+
+### Financial Input Evidence
+
+| Field | Value | Source Type | Source ID | Locator |
+|---|---:|---|---|---|
+{_rows(p.financial_inputs)}
+
+### Clinical Input Evidence
+
+| Field | Value | Source Type | Source ID | Locator |
+|---|---:|---|---|---|
+{_rows(p.clinical_inputs)}
+
+### Claim Evidence
+
+| Field | Value | Source Type | Source ID | Locator |
+|---|---:|---|---|---|
+{_rows(p.claims)}"""
+
+
 # ---------------------------------------------------------------------------
 # Master report assembler
 # ---------------------------------------------------------------------------
@@ -786,6 +897,9 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
     sections: List[str] = [
         _header(r, req),
         _data_quality_section(r),
+        _model_validation_section(r),
+        _financial_clock_decomposition_section(r),
+        _planned_financing_section(req, r),
         _executive_summary(r, req),
         _ic_snapshot(r, req),
         _capital_runway_section(r, req),
@@ -800,6 +914,7 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
         _sensitivity_section(r, req),
         _diligence_questions_section(r),
         _assumptions_section(r),
+        _provenance_appendix(r),
         _conclusion_section(r, req),
     ]
     return "\n\n---\n\n".join(sections)
