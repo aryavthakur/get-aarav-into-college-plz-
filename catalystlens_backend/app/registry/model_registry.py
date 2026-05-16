@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+CalibrationStatus = Literal[
+    "synthetic_test_only",
+    "preliminary_backtest",
+    "insufficient_data",
+    "externally_validated",
+]
 
 
 class ModelArtifactCard(BaseModel):
@@ -17,6 +25,25 @@ class ModelArtifactCard(BaseModel):
     feature_schema_version: str
     metrics: Dict[str, float] = Field(default_factory=dict)
     config_hash: str
+    training_dataset_id: Optional[str] = None
+    validation_dataset_id: Optional[str] = None
+    n_training_examples: int = 0
+    n_validation_examples: int = 0
+    validation_metrics: Dict[str, float] = Field(default_factory=dict)
+    calibration_status: CalibrationStatus = "insufficient_data"
+    validation_report_path: Optional[str] = None
+    trained_artifact_path: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validation_status_must_match_evidence(self) -> "ModelArtifactCard":
+        if self.validation_dataset_id and "synthetic" in self.validation_dataset_id.lower():
+            if self.calibration_status == "externally_validated":
+                raise ValueError("synthetic validation cannot be marked externally_validated")
+            if not self.validation_metrics and self.calibration_status != "synthetic_test_only":
+                self.calibration_status = "synthetic_test_only"
+        if not self.validation_metrics and self.calibration_status not in {"synthetic_test_only", "insufficient_data"}:
+            self.calibration_status = "insufficient_data"
+        return self
 
 
 class ModelRegistry:
@@ -32,3 +59,9 @@ class ModelRegistry:
     def load(self, artifact_id: str) -> ModelArtifactCard:
         path = self.root / f"{artifact_id}.json"
         return ModelArtifactCard(**json.loads(path.read_text()))
+
+    def list_cards(self) -> List[ModelArtifactCard]:
+        return [
+            ModelArtifactCard(**json.loads(path.read_text()))
+            for path in sorted(self.root.glob("*.json"))
+        ]
