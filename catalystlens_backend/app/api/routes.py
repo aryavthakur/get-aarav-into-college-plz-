@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from app.registry.model_registry import ModelRegistry
 from app.engines.bayesian_success import run_success_probability_analysis
 from app.engines.burn_regime import run_burn_regime_analysis
 from app.engines.disclosure_consistency import run_disclosure_consistency_analysis
@@ -44,6 +45,27 @@ def root():
         "model_mode": "research_mode",
         "official_data_clients": ["sec_edgar", "clinicaltrials_gov", "fred"],
         "artifact_serving": "manual_assumption_engine_until_trained_artifacts_exist",
+    }
+
+
+@router.get("/validation/status", tags=["validation"])
+def validation_status():
+    """Return current model validation status without treating synthetic runs as real validation."""
+    registry = ModelRegistry("artifacts/model_registry")
+    cards = registry.list_cards()
+    latest_metrics = None
+    calibration_status = "insufficient_data"
+    if cards:
+        latest = sorted(cards, key=lambda card: card.artifact_id)[-1]
+        latest_metrics = latest.validation_metrics or None
+        calibration_status = latest.calibration_status
+    return {
+        "engine_mode": "research_mode",
+        "calibration_status": calibration_status,
+        "available_model_cards": [card.model_dump(mode="json") for card in cards],
+        "trained_artifacts_loaded": False,
+        "latest_backtest_metrics": latest_metrics,
+        "synthetic_metrics_are_validation": False,
     }
 
 
