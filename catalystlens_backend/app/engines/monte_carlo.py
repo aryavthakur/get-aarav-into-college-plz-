@@ -881,6 +881,54 @@ def _build_validation_snapshot() -> ValidationSnapshot:
     )
 
 
+def _clamp_prob(value: float) -> float:
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def _apply_planned_financing_state_probabilities(
+    valuation_result,
+    planned_events: list[FinancingEventInput],
+    catalyst_month: float,
+):
+    """Overlay deterministic planned financing events that occur before catalyst."""
+    p_clean = valuation_result.p_clean_refinancing_before_catalyst
+    p_distressed = valuation_result.p_distressed_refinancing_before_catalyst
+    p_partnership = valuation_result.p_partnership_before_catalyst
+    p_debt = valuation_result.p_debt_or_royalty_before_catalyst
+    p_cash_exhaustion = valuation_result.p_cash_exhaustion_before_catalyst
+    p_discontinued = valuation_result.p_program_discontinuation_before_catalyst
+
+    for event in planned_events:
+        if event.month > catalyst_month:
+            continue
+        if event.kind == "clean_refi":
+            p_clean = 1.0
+        elif event.kind == "distressed_refi":
+            p_distressed = 1.0
+        elif event.kind == "partnership":
+            p_partnership = 1.0
+
+    p_any = _clamp_prob(p_clean + p_distressed + p_partnership + p_debt + p_cash_exhaustion)
+    p_pressure = _clamp_prob(p_distressed + p_debt + p_cash_exhaustion + p_discontinued)
+    p_nondilutive = _clamp_prob(p_partnership)
+    p_dilutive = _clamp_prob(p_clean + p_distressed)
+
+    return valuation_result.model_copy(update={
+        "p_refinancing_success": round(_clamp_prob(p_clean), 4),
+        "p_distressed_financing": round(_clamp_prob(p_distressed), 4),
+        "p_clean_refinancing_before_catalyst": round(_clamp_prob(p_clean), 4),
+        "p_distressed_refinancing_before_catalyst": round(_clamp_prob(p_distressed), 4),
+        "p_partnership_before_catalyst": round(_clamp_prob(p_partnership), 4),
+        "p_debt_or_royalty_before_catalyst": round(_clamp_prob(p_debt), 4),
+        "p_cash_exhaustion_before_catalyst": round(_clamp_prob(p_cash_exhaustion), 4),
+        "p_program_discontinuation_before_catalyst": round(_clamp_prob(p_discontinued), 4),
+        "p_any_financing_event_before_catalyst": round(p_any, 4),
+        "p_financing_pressure_before_catalyst": round(p_pressure, 4),
+        "p_nondilutive_financing_before_catalyst": round(p_nondilutive, 4),
+        "p_dilutive_financing_before_catalyst": round(p_dilutive, 4),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Risk classification
 # ---------------------------------------------------------------------------
@@ -987,6 +1035,11 @@ def run_full_audit(
         t_sci, t_fin, pos_samples, valuation, streams.valuation,
         market_condition_score=float(financial.biotech_market_condition_score),
         config=config,
+    )
+    val_result = _apply_planned_financing_state_probabilities(
+        val_result,
+        financial.planned_financing_events,
+        milestone_result.public_readout_months,
     )
 
     # ---- Step 9: Scenario analysis ----

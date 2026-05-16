@@ -44,6 +44,10 @@ from app.core.config import CatalystLensConfig, get_default_config
 from app.models.schemas import ValuationInput, ValuationResult
 
 
+def _clamp_prob(value: float) -> float:
+    return float(np.clip(value, 0.0, 1.0))
+
+
 def _compute_financing_states(
     t_sci: np.ndarray,
     t_fin: np.ndarray,
@@ -188,6 +192,18 @@ def run_valuation_simulation(
         mask = states == state_id
         return float(np.mean(values[mask])) if mask.any() else 0.0
 
+    p_funded = _clamp_prob(float(np.mean(states == 0)))
+    p_clean = _clamp_prob(float(np.mean(states == 1)))
+    p_distressed = _clamp_prob(float(np.mean(states == 2)))
+    p_discontinued = _clamp_prob(float(np.mean(states == 3)))
+    p_partnership = 0.0
+    p_debt_or_royalty = 0.0
+    p_cash_exhaustion = 0.0
+    p_any_financing = _clamp_prob(p_clean + p_distressed + p_partnership + p_debt_or_royalty + p_cash_exhaustion)
+    p_pressure = _clamp_prob(p_distressed + p_debt_or_royalty + p_cash_exhaustion + p_discontinued)
+    p_nondilutive = _clamp_prob(p_partnership)
+    p_dilutive = _clamp_prob(p_clean + p_distressed)
+
     return ValuationResult(
         mean_value=round(float(np.mean(values)), 2),
         median_value=round(float(np.median(values)), 2),
@@ -199,10 +215,20 @@ def run_valuation_simulation(
         probability_downside=round(prob_downside, 4),
         probability_high_upside=round(prob_high_upside, 4),
         high_upside_threshold=round(high_upside_threshold, 2),
-        p_funded_through_catalyst=round(float(np.mean(states == 0)), 4),
-        p_refinancing_success=round(float(np.mean(states == 1)), 4),
-        p_distressed_financing=round(float(np.mean(states == 2)), 4),
-        p_program_discontinuation=round(float(np.mean(states == 3)), 4),
+        p_funded_through_catalyst=round(p_funded, 4),
+        p_refinancing_success=round(p_clean, 4),
+        p_distressed_financing=round(p_distressed, 4),
+        p_program_discontinuation=round(p_discontinued, 4),
+        p_clean_refinancing_before_catalyst=round(p_clean, 4),
+        p_distressed_refinancing_before_catalyst=round(p_distressed, 4),
+        p_partnership_before_catalyst=round(p_partnership, 4),
+        p_debt_or_royalty_before_catalyst=round(p_debt_or_royalty, 4),
+        p_cash_exhaustion_before_catalyst=round(p_cash_exhaustion, 4),
+        p_program_discontinuation_before_catalyst=round(p_discontinued, 4),
+        p_any_financing_event_before_catalyst=round(p_any_financing, 4),
+        p_financing_pressure_before_catalyst=round(p_pressure, 4),
+        p_nondilutive_financing_before_catalyst=round(p_nondilutive, 4),
+        p_dilutive_financing_before_catalyst=round(p_dilutive, 4),
         mean_value_if_funded=round(_mean_state_value(0), 2),
         mean_value_if_refinanced=round(_mean_state_value(1), 2),
         mean_value_if_distressed=round(_mean_state_value(2), 2),

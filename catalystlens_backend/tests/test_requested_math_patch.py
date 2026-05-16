@@ -126,6 +126,39 @@ class TestCashPathCapIntegration:
         assert "Planned Financing Events" in with_event.markdown_report
         assert "Clean Refi" in with_event.markdown_report
 
+    def test_explicit_financing_state_probabilities_are_exposed(self):
+        result = run_full_audit(_request())
+        val = result.valuation
+
+        assert val.p_clean_refinancing_before_catalyst == pytest.approx(val.p_refinancing_success)
+        assert val.p_distressed_refinancing_before_catalyst == pytest.approx(val.p_distressed_financing)
+        assert val.p_program_discontinuation_before_catalyst == pytest.approx(val.p_program_discontinuation)
+        assert 0.0 <= val.p_any_financing_event_before_catalyst <= 1.0
+        assert 0.0 <= val.p_financing_pressure_before_catalyst <= 1.0
+
+    def test_planned_partnership_before_catalyst_sets_partnership_probability(self):
+        result = run_full_audit(
+            _request(events=[FinancingEventInput(month=3, kind="partnership", gross_proceeds=10_000_000)])
+        )
+
+        assert result.valuation.p_partnership_before_catalyst == pytest.approx(1.0)
+        assert result.valuation.p_nondilutive_financing_before_catalyst == pytest.approx(1.0)
+
+    def test_planned_clean_refi_before_catalyst_sets_clean_probability(self):
+        result = run_full_audit(
+            _request(events=[FinancingEventInput(month=3, kind="clean_refi", gross_proceeds=10_000_000)])
+        )
+
+        assert result.valuation.p_clean_refinancing_before_catalyst == pytest.approx(1.0)
+        assert result.valuation.p_dilutive_financing_before_catalyst >= result.valuation.p_clean_refinancing_before_catalyst
+
+    def test_planned_financing_after_catalyst_does_not_set_before_catalyst_probability(self):
+        result = run_full_audit(
+            _request(events=[FinancingEventInput(month=24, kind="partnership", gross_proceeds=10_000_000)])
+        )
+
+        assert result.valuation.p_partnership_before_catalyst == pytest.approx(0.0)
+
 
 class TestHierarchicalPoS:
     def test_exact_prior_lookup_changes_phase_prior_and_reports_source(self):

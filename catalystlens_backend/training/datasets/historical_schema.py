@@ -69,6 +69,7 @@ class HistoricalCompanyCatalystExample(BaseModel):
     financing_type: Optional[FinancingType] = "none"
     estimated_dilution: Optional[float] = Field(None, ge=0.0, le=1.0)
     program_discontinued_before_catalyst: bool
+    cash_distress_or_going_concern_before_catalyst: bool = False
     clinical_outcome: Optional[ClinicalOutcome] = None
     delayed_readout: Optional[bool] = None
     source_notes: Optional[str] = None
