@@ -33,20 +33,30 @@ class BacktestMetricSummary(BaseModel):
     confusion_matrix: dict[str, int]
     event_rate: float
     mean_predicted_probability: float
+    overprediction_gap: float
+    underprediction_gap: float
+    calibration_direction: Literal["overpredicting", "underpredicting", "approximately_calibrated"]
 
 
 class PerExampleBacktestResult(BaseModel):
     example_id: str
+    company_name: str
     ticker: str
     as_of_date: str
     predicted_cashout_risk: float
-    predicted_reaches_catalyst_before_cashout: float
+    predicted_financing_before_catalyst: float
+    predicted_distressed_or_cashout_before_catalyst: float
+    predicted_clean_or_nondilutive_financing_before_catalyst: float
     predicted_program_discontinuation: float
+    predicted_reaches_catalyst_before_financing_pressure: float
+    predicted_reaches_catalyst_before_cashout: float
     posterior_mean_pos: float
     actual_financing_before_catalyst: bool
+    actual_distressed_financing_or_cashout: bool
     actual_reached_catalyst_before_financing_pressure: bool
     actual_program_discontinued_before_catalyst: bool
     actual_clinical_success: Optional[bool] = None
+    probability_mapping_note: str
 
 
 class BacktestResult(BaseModel):

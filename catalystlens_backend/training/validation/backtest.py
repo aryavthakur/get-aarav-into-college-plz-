@@ -21,6 +21,7 @@ from app.models.schemas import (
 from training.datasets.historical_schema import HistoricalCompanyCatalystExample, HistoricalDataset
 from training.validation.metrics import (
     brier_score,
+    calibration_diagnostics,
     calibration_by_bucket,
     confusion_matrix_at_threshold,
     expected_calibration_error,
@@ -31,6 +32,10 @@ from training.validation.schemas import (
     BacktestMetricSummary,
     BacktestResult,
     PerExampleBacktestResult,
+)
+from training.validation.target_mapping import (
+    extract_actual_label,
+    mapped_probabilities,
 )
 
 
@@ -169,13 +174,21 @@ def _target_values(results: Iterable[PerExampleBacktestResult], target_name: str
     for row in results:
         if target_name == "financing_before_catalyst":
             y_true.append(int(row.actual_financing_before_catalyst))
-            y_prob.append(row.predicted_cashout_risk)
+            y_prob.append(row.predicted_financing_before_catalyst)
+        elif target_name == "distressed_financing_or_cashout":
+            y_true.append(int(row.actual_distressed_financing_or_cashout))
+            y_prob.append(row.predicted_distressed_or_cashout_before_catalyst)
         elif target_name == "program_discontinued_before_catalyst":
             y_true.append(int(row.actual_program_discontinued_before_catalyst))
             y_prob.append(row.predicted_program_discontinuation)
         elif target_name == "reached_catalyst_before_financing_pressure":
             y_true.append(int(row.actual_reached_catalyst_before_financing_pressure))
-            y_prob.append(row.predicted_reaches_catalyst_before_cashout)
+            y_prob.append(row.predicted_reaches_catalyst_before_financing_pressure)
+        elif target_name == "clinical_success":
+            if row.actual_clinical_success is None:
+                continue
+            y_true.append(int(row.actual_clinical_success))
+            y_prob.append(row.posterior_mean_pos)
         else:
             raise ValueError(f"Unsupported backtest target: {target_name}")
     return y_true, y_prob
@@ -204,26 +217,34 @@ def run_backtest(
             clinical_success = True
         elif example.clinical_outcome == "negative":
             clinical_success = False
-        reached = not (
-            example.financing_before_catalyst
-            or example.program_discontinued_before_catalyst
-        )
+        reached = bool(extract_actual_label(example, "reached_catalyst_before_financing_pressure"))
+        mapped = mapped_probabilities(audit)
         per_example.append(PerExampleBacktestResult(
             example_id=example.example_id,
+            company_name=example.company_name,
             ticker=example.ticker,
             as_of_date=example.as_of_date.isoformat(),
-            predicted_cashout_risk=audit.capital_to_catalyst.probability_cashout_before_catalyst,
+            predicted_cashout_risk=float(mapped["predicted_cashout_risk"]),
+            predicted_financing_before_catalyst=float(mapped["predicted_financing_before_catalyst"]),
+            predicted_distressed_or_cashout_before_catalyst=float(mapped["predicted_distressed_or_cashout_before_catalyst"]),
+            predicted_clean_or_nondilutive_financing_before_catalyst=float(mapped["predicted_clean_or_nondilutive_financing_before_catalyst"]),
             predicted_reaches_catalyst_before_cashout=audit.capital_to_catalyst.probability_reaches_catalyst,
-            predicted_program_discontinuation=audit.valuation.p_program_discontinuation,
+            predicted_program_discontinuation=float(mapped["predicted_program_discontinuation"]),
+            predicted_reaches_catalyst_before_financing_pressure=float(mapped["predicted_reaches_catalyst_before_financing_pressure"]),
             posterior_mean_pos=audit.success_probability.posterior_mean,
             actual_financing_before_catalyst=example.financing_before_catalyst,
+            actual_distressed_financing_or_cashout=bool(extract_actual_label(example, "distressed_financing_or_cashout")),
             actual_reached_catalyst_before_financing_pressure=reached,
             actual_program_discontinued_before_catalyst=example.program_discontinued_before_catalyst,
             actual_clinical_success=clinical_success,
+            probability_mapping_note=str(mapped["probability_mapping_note"]),
         ))
 
     y_true, y_prob = _target_values(per_example, target_name)
     buckets = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    event_rate = float(np.mean(y_true))
+    mean_predicted = float(np.mean(y_prob))
+    diagnostics = calibration_diagnostics(mean_predicted, event_rate)
     summary = BacktestMetricSummary(
         n_examples=len(per_example),
         brier_score=brier_score(y_true, y_prob),
@@ -232,8 +253,11 @@ def run_backtest(
         expected_calibration_error=expected_calibration_error(y_true, y_prob, buckets),
         calibration_buckets=calibration_by_bucket(y_true, y_prob, buckets),
         confusion_matrix=confusion_matrix_at_threshold(y_true, y_prob, threshold=0.5),
-        event_rate=float(np.mean(y_true)),
-        mean_predicted_probability=float(np.mean(y_prob)),
+        event_rate=event_rate,
+        mean_predicted_probability=mean_predicted,
+        overprediction_gap=float(diagnostics["overprediction_gap"]),
+        underprediction_gap=float(diagnostics["underprediction_gap"]),
+        calibration_direction=str(diagnostics["calibration_direction"]),
     )
     status = "synthetic_test_only" if dataset.synthetic else (
         "preliminary_backtest" if len(per_example) >= 25 else "insufficient_data"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from training.validation.schemas import BacktestResult
+from training.validation.target_mapping import TARGET_DEFINITIONS
 
 
 def _fmt_pct(value: float | None) -> str:
@@ -27,6 +28,12 @@ def generate_backtest_report(result: BacktestResult) -> str:
     )
     cm = result.metric_summary.confusion_matrix
     warnings = "\n".join(f"- {w}" for w in result.warnings) or "- None"
+    target = TARGET_DEFINITIONS[result.target_name]
+    mapping_warning = (
+        "\n> Probability mapping is approximate because the current audit response does not expose all "
+        "financing-state probabilities.\n"
+        if target.approximate else ""
+    )
     return f"""# CatalystLens Backtest Report
 {synthetic_warning}
 ## 1. Dataset Summary
@@ -40,6 +47,15 @@ def generate_backtest_report(result: BacktestResult) -> str:
 
 Target: `{result.target_name}`
 
+## Label Definition and Probability Mapping
+{mapping_warning}
+- Actual label definition: {target.positive_label_definition}
+- Label description: {target.label_description}
+- Model probability used: {target.probability_description}
+- Probability source: {target.probability_source}
+- Mapping exact: `{not target.approximate}`
+- Fallback logic: {target.fallback_logic}
+
 For synthetic datasets, this target is a pipeline smoke test only and is not evidence of real-world calibration.
 
 ## 3. Metrics
@@ -49,6 +65,9 @@ For synthetic datasets, this target is a pipeline smoke test only and is not evi
 | N examples | {result.metric_summary.n_examples} |
 | Event rate | {_fmt_pct(result.metric_summary.event_rate)} |
 | Mean predicted probability | {_fmt_pct(result.metric_summary.mean_predicted_probability)} |
+| Overprediction gap | {_fmt_pct(result.metric_summary.overprediction_gap)} |
+| Underprediction gap | {_fmt_pct(result.metric_summary.underprediction_gap)} |
+| Calibration direction | {result.metric_summary.calibration_direction} |
 | Brier score | {result.metric_summary.brier_score:.4f} |
 | Log loss | {result.metric_summary.log_loss:.4f} |
 | ROC AUC | {result.metric_summary.roc_auc if result.metric_summary.roc_auc is not None else "NA"} |
