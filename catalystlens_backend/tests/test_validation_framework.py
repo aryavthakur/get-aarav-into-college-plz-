@@ -17,12 +17,20 @@ from training.datasets.historical_schema import (
 )
 from training.validation.backtest import load_historical_examples, run_backtest
 from training.validation.backtest_report import generate_backtest_report
+from training.validation.run_backtest import write_prediction_error_table
 from training.validation.metrics import (
     brier_score,
+    calibration_diagnostics,
     calibration_by_bucket,
     confusion_matrix_at_threshold,
     expected_calibration_error,
     log_loss_binary,
+)
+from training.validation.schemas import PerExampleBacktestResult
+from training.validation.target_mapping import (
+    TARGET_DEFINITIONS,
+    extract_actual_label,
+    probability_for_target,
 )
 
 
@@ -52,6 +60,22 @@ def _example(**overrides) -> HistoricalCompanyCatalystExample:
     }
     data.update(overrides)
     return HistoricalCompanyCatalystExample(**data)
+
+
+class _MockCapitalToCatalyst:
+    probability_cashout_before_catalyst = 0.2
+    probability_reaches_catalyst = 0.7
+
+
+class _MockValuation:
+    p_refinancing_success = 0.3
+    p_distressed_financing = 0.2
+    p_program_discontinuation = 0.1
+
+
+class _MockAudit:
+    capital_to_catalyst = _MockCapitalToCatalyst()
+    valuation = _MockValuation()
 
 
 class TestHistoricalSchemas:
@@ -102,6 +126,47 @@ class TestValidationMetrics:
         cm = confusion_matrix_at_threshold([0, 1, 1, 0], [0.1, 0.8, 0.4, 0.7], threshold=0.5)
         assert cm == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
 
+    def test_calibration_diagnostics_direction(self):
+        over = calibration_diagnostics(mean_predicted_probability=0.37, observed_event_rate=0.11)
+        under = calibration_diagnostics(mean_predicted_probability=0.10, observed_event_rate=0.30)
+        near = calibration_diagnostics(mean_predicted_probability=0.31, observed_event_rate=0.30)
+
+        assert over["calibration_direction"] == "overpredicting"
+        assert over["overprediction_gap"] == pytest.approx(0.26)
+        assert under["calibration_direction"] == "underpredicting"
+        assert under["underprediction_gap"] == pytest.approx(0.20)
+        assert near["calibration_direction"] == "approximately_calibrated"
+
+
+class TestTargetProbabilityMapping:
+    def test_financing_before_catalyst_uses_financing_states_not_raw_cashout(self):
+        probability, note = probability_for_target(_MockAudit(), "financing_before_catalyst")
+
+        assert probability == pytest.approx(0.6)
+        assert probability > _MockAudit.capital_to_catalyst.probability_cashout_before_catalyst
+        assert "financing-state" in note
+
+    def test_target_mapping_clamps_probabilities(self):
+        audit = _MockAudit()
+        audit.valuation.p_refinancing_success = 0.8
+        audit.valuation.p_distressed_financing = 0.7
+        audit.valuation.p_program_discontinuation = 0.4
+
+        probability, _ = probability_for_target(audit, "financing_before_catalyst")
+
+        assert probability == pytest.approx(1.0)
+
+    def test_reached_label_requires_actual_readout_date(self):
+        missing = _example(actual_readout_date=None, financing_before_catalyst=False, program_discontinued_before_catalyst=False)
+        clean = _example(actual_readout_date="2023-04-15", financing_before_catalyst=False, program_discontinued_before_catalyst=False)
+        financed = _example(actual_readout_date="2023-04-15", financing_before_catalyst=True, financing_type="clean_refinancing")
+        discontinued = _example(actual_readout_date="2023-04-15", program_discontinued_before_catalyst=True)
+
+        assert extract_actual_label(missing, "reached_catalyst_before_financing_pressure") is False
+        assert extract_actual_label(clean, "reached_catalyst_before_financing_pressure") is True
+        assert extract_actual_label(financed, "reached_catalyst_before_financing_pressure") is False
+        assert extract_actual_label(discontinued, "reached_catalyst_before_financing_pressure") is False
+
 
 class TestSyntheticBacktest:
     def test_synthetic_dataset_loads(self):
@@ -120,6 +185,14 @@ class TestSyntheticBacktest:
         assert result.metric_summary.n_examples == ds.n_examples
         assert len(result.per_example_results) == ds.n_examples
         assert result.metric_summary.brier_score >= 0
+        assert result.metric_summary.calibration_direction in {
+            "overpredicting",
+            "underpredicting",
+            "approximately_calibrated",
+        }
+        assert "financing_before_catalyst" in TARGET_DEFINITIONS
+        assert result.per_example_results[0].probability_mapping_note
+        assert 0.0 <= result.per_example_results[0].predicted_financing_before_catalyst <= 1.0
 
     def test_backtest_report_contains_synthetic_warning(self):
         result = run_backtest(load_historical_examples(DATASET_PATH))
@@ -127,6 +200,26 @@ class TestSyntheticBacktest:
 
         assert "CatalystLens Backtest Report" in report
         assert "synthetic test data and does not validate model performance" in report
+        assert "Label Definition and Probability Mapping" in report
+        assert "broader than cash exhaustion" in report
+
+    def test_target_values_use_financing_probability_field(self):
+        result = run_backtest(load_historical_examples(DATASET_PATH))
+        assert any(
+            row.predicted_financing_before_catalyst != row.predicted_cashout_risk
+            for row in result.per_example_results
+        )
+
+    def test_prediction_error_table_exports_mapping_note(self, tmp_path):
+        result = run_backtest(load_historical_examples(DATASET_PATH))
+        path = tmp_path / "errors.csv"
+
+        write_prediction_error_table(result, path)
+        text = path.read_text()
+
+        assert "absolute_error" in text
+        assert "probability_mapping_note" in text
+        assert result.per_example_results[0].example_id in text
 
 
 class TestModelRegistryValidationMetadata:

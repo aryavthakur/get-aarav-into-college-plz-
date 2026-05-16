@@ -104,3 +104,22 @@ def confusion_matrix_at_threshold(
         "tn": int(np.sum(~pred & ~truth)),
         "fn": int(np.sum(~pred & truth)),
     }
+
+
+def calibration_diagnostics(
+    mean_predicted_probability: float,
+    observed_event_rate: float,
+    tolerance: float = 0.05,
+) -> dict[str, float | str]:
+    gap = float(mean_predicted_probability - observed_event_rate)
+    if gap > tolerance:
+        direction = "overpredicting"
+    elif gap < -tolerance:
+        direction = "underpredicting"
+    else:
+        direction = "approximately_calibrated"
+    return {
+        "overprediction_gap": max(gap, 0.0),
+        "underprediction_gap": max(-gap, 0.0),
+        "calibration_direction": direction,
+    }
