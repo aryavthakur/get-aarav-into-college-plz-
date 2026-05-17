@@ -911,10 +911,12 @@ def _apply_planned_financing_state_probabilities(
             p_distressed = 1.0
         elif event.kind == "partnership":
             p_partnership = 1.0
+        elif event.kind == "debt_or_royalty":
+            p_debt = 1.0
 
     p_any = _clamp_prob(p_clean + p_distressed + p_partnership + p_debt + p_cash_exhaustion)
     p_pressure = _clamp_prob(p_distressed + p_cash_exhaustion + p_discontinued)
-    p_nondilutive = _clamp_prob(p_partnership)
+    p_nondilutive = _clamp_prob(p_partnership + p_debt)
     p_dilutive = _clamp_prob(p_clean + p_distressed)
 
     return valuation_result.model_copy(update={
@@ -949,7 +951,10 @@ def _apply_heuristic_event_taxonomy(
         valuation_result.p_partnership_before_catalyst,
         strategy.p_partnership_or_nondilutive,
     )
-    p_debt = valuation_result.p_debt_or_royalty_before_catalyst
+    p_debt = max(
+        valuation_result.p_debt_or_royalty_before_catalyst,
+        strategy.p_debt_or_royalty,
+    )
     p_cash = max(
         valuation_result.p_cash_exhaustion_before_catalyst,
         strategy.p_cash_exhaustion,

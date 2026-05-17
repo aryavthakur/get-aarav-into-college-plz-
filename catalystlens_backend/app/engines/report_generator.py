@@ -476,7 +476,24 @@ value captured by current shareholders even in a successful clinical outcome.
 
 This financing risk discount represents the modelled erosion of expected value
 attributable to the probability of needing to raise capital before the catalyst,
-diluting existing shareholders in the process."""
+diluting existing shareholders in the process.
+
+### Heuristic Event-Taxonomy Estimates (Before Catalyst)
+
+> **UNCALIBRATED — heuristic candidate features; source verification required.**
+> These estimates are produced by deterministic rules and untrained heuristics.
+> They are NOT validated model outputs. Do not use for investment decisions
+> without independent analyst review.
+
+| Event Type | Heuristic Estimate | Status |
+|---|---:|---|
+| Clean / proactive refinancing | {_fmt_pct(val.p_clean_refinancing_before_catalyst)} | heuristic, uncalibrated |
+| Partnership or non-dilutive | {_fmt_pct(val.p_partnership_before_catalyst)} | heuristic, uncalibrated |
+| Debt or royalty financing | {_fmt_pct(val.p_debt_or_royalty_before_catalyst)} | heuristic, uncalibrated |
+| Distressed refinancing | {_fmt_pct(val.p_distressed_refinancing_before_catalyst)} | heuristic, uncalibrated |
+| Cash exhaustion | {_fmt_pct(val.p_cash_exhaustion_before_catalyst)} | heuristic, uncalibrated |
+| Any financing event | {_fmt_pct(val.p_any_financing_event_before_catalyst)} | heuristic, uncalibrated |
+| Financing pressure | {_fmt_pct(val.p_financing_pressure_before_catalyst)} | heuristic, uncalibrated |"""
 
 
 def _disclosure_section(r: AuditResponse, req: AuditRequest) -> str:

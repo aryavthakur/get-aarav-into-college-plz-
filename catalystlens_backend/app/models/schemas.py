@@ -26,7 +26,7 @@ CatalystType = Literal[
     "phase_completion", "interim_analysis", "primary_readout",
     "regulatory_submission", "approval_decision", "proof_of_concept",
 ]
-FinancingEventKind = Literal["clean_refi", "distressed_refi", "partnership"]
+FinancingEventKind = Literal["clean_refi", "distressed_refi", "partnership", "debt_or_royalty"]
 
 FinancingState = Literal[
     "funded",
