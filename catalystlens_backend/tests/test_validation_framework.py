@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.main import app
+from app.models.schemas import SimulationConfig
 from app.registry.model_registry import ModelArtifactCard, ModelRegistry
 from training.datasets.historical_schema import (
     HistoricalCompanyCatalystExample,
@@ -35,6 +36,19 @@ from training.validation.target_mapping import (
 
 
 DATASET_PATH = Path("training/datasets/example_historical_biotech_panel.csv")
+
+
+@pytest.fixture(scope="module")
+def synthetic_dataset():
+    return load_historical_examples(DATASET_PATH)
+
+
+@pytest.fixture(scope="module")
+def synthetic_backtest_result(synthetic_dataset):
+    return run_backtest(
+        synthetic_dataset,
+        SimulationConfig(n_simulations=100, random_seed=42, monthly_horizon=48),
+    )
 
 
 def _example(**overrides) -> HistoricalCompanyCatalystExample:
@@ -209,23 +223,35 @@ class TestTargetProbabilityMapping:
 
         assert probability == pytest.approx(0.60)
 
+    def test_split_validation_targets_are_registered(self):
+        for target in (
+            "reached_public_readout",
+            "reached_without_any_financing_event",
+            "reached_without_dilutive_financing",
+            "reached_without_distress",
+            "failed_before_readout_due_to_science",
+            "failed_before_readout_due_to_finance",
+        ):
+            assert target in TARGET_DEFINITIONS
+            probability, note = probability_for_target(_ExactAudit(), target)
+            assert 0.0 <= probability <= 1.0
+            assert note
+
 
 class TestSyntheticBacktest:
-    def test_synthetic_dataset_loads(self):
-        ds = load_historical_examples(DATASET_PATH)
-        assert ds.synthetic is True
-        assert ds.n_examples >= 30
-        assert "synthetic" in ds.source_description.lower()
+    def test_synthetic_dataset_loads(self, synthetic_dataset):
+        assert synthetic_dataset.synthetic is True
+        assert synthetic_dataset.n_examples >= 30
+        assert "synthetic" in synthetic_dataset.source_description.lower()
 
-    def test_backtest_runs_end_to_end_on_synthetic_data(self):
-        ds = load_historical_examples(DATASET_PATH)
-        result = run_backtest(ds)
+    def test_backtest_runs_end_to_end_on_synthetic_data(self, synthetic_dataset, synthetic_backtest_result):
+        result = synthetic_backtest_result
 
         assert result.synthetic is True
         assert result.calibration_status == "synthetic_test_only"
-        assert result.n_examples == ds.n_examples
-        assert result.metric_summary.n_examples == ds.n_examples
-        assert len(result.per_example_results) == ds.n_examples
+        assert result.n_examples == synthetic_dataset.n_examples
+        assert result.metric_summary.n_examples == synthetic_dataset.n_examples
+        assert len(result.per_example_results) == synthetic_dataset.n_examples
         assert result.metric_summary.brier_score >= 0
         assert result.metric_summary.calibration_direction in {
             "overpredicting",
@@ -236,9 +262,8 @@ class TestSyntheticBacktest:
         assert result.per_example_results[0].probability_mapping_note
         assert 0.0 <= result.per_example_results[0].predicted_financing_before_catalyst <= 1.0
 
-    def test_backtest_report_contains_synthetic_warning(self):
-        result = run_backtest(load_historical_examples(DATASET_PATH))
-        report = generate_backtest_report(result)
+    def test_backtest_report_contains_synthetic_warning(self, synthetic_backtest_result):
+        report = generate_backtest_report(synthetic_backtest_result)
 
         assert "CatalystLens Backtest Report" in report
         assert "synthetic test data and does not validate model performance" in report
@@ -248,15 +273,15 @@ class TestSyntheticBacktest:
         assert "p_financing_pressure_before_catalyst" in report
         assert "clean/proactive financing" in report
 
-    def test_target_values_use_financing_probability_field(self):
-        result = run_backtest(load_historical_examples(DATASET_PATH))
+    def test_target_values_use_financing_probability_field(self, synthetic_backtest_result):
+        result = synthetic_backtest_result
         assert any(
             row.predicted_financing_before_catalyst != row.predicted_cashout_risk
             for row in result.per_example_results
         )
 
-    def test_prediction_error_table_exports_mapping_note(self, tmp_path):
-        result = run_backtest(load_historical_examples(DATASET_PATH))
+    def test_prediction_error_table_exports_mapping_note(self, tmp_path, synthetic_backtest_result):
+        result = synthetic_backtest_result
         path = tmp_path / "errors.csv"
 
         write_prediction_error_table(result, path)

@@ -36,6 +36,20 @@ def _ai_error_diagnosis_section(result: BacktestResult) -> str:
     patch_rows = "\n".join(
         f"- {patch} ({count})" for patch, count in patch_counts.most_common(5)
     ) or "- None"
+    flag_names = [
+        "false_negative_financing_event",
+        "false_positive_financing_event",
+        "false_negative_program_discontinuation",
+        "false_positive_program_discontinuation",
+        "scientific_failure_not_captured",
+        "partnership_not_captured",
+        "clean_refi_not_captured",
+        "target_definition_ambiguous",
+    ]
+    flag_rows = "\n".join(
+        f"| {flag} | {sum(1 for row in diagnosed if getattr(row, flag))} |"
+        for flag in flag_names
+    )
     return f"""## AI-Assisted Error Diagnosis
 
 These diagnoses are heuristic AI-assisted diagnosis, not validated causal explanations. Source verification and human review are required before using them for model changes.
@@ -51,6 +65,12 @@ These diagnoses are heuristic AI-assisted diagnosis, not validated causal explan
 Suggested model improvements:
 
 {patch_rows}
+
+### Diagnostic Flag Counts
+
+| Flag | Count |
+|---|---:|
+{flag_rows}
 """
 
 

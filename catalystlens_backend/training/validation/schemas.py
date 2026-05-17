@@ -57,6 +57,8 @@ class PerExampleBacktestResult(BaseModel):
     actual_program_discontinued_before_catalyst: bool
     actual_clinical_success: Optional[bool] = None
     probability_mapping_note: str
+    extra_actual_labels: dict[str, bool] = Field(default_factory=dict)
+    extra_predicted_probabilities: dict[str, float] = Field(default_factory=dict)
     error_type: Optional[str] = None
     diagnosed_failure_mode: Optional[str] = None
     likely_missing_features: list[str] = Field(default_factory=list)
@@ -67,6 +69,14 @@ class PerExampleBacktestResult(BaseModel):
     proactive_financing_likelihood: Optional[float] = None
     scientific_discontinuation_risk_score: Optional[float] = None
     safety_sensitive_modality_score: Optional[float] = None
+    false_negative_financing_event: bool = False
+    false_positive_financing_event: bool = False
+    false_negative_program_discontinuation: bool = False
+    false_positive_program_discontinuation: bool = False
+    scientific_failure_not_captured: bool = False
+    partnership_not_captured: bool = False
+    clean_refi_not_captured: bool = False
+    target_definition_ambiguous: bool = False
 
 
 class BacktestResult(BaseModel):

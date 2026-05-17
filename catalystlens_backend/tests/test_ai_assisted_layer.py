@@ -22,6 +22,8 @@ from app.ai.claim_extraction import (
 from app.ai.error_diagnosis import diagnose_prediction_error
 from app.ai.feature_enrichment import enrich_company_features
 from app.ai.schemas import AIBacktestErrorDiagnosis, AIExtractionResult
+from app.engines.financing_strategy import estimate_financing_strategy
+from app.engines.program_discontinuation import estimate_program_discontinuation
 from training.validation.backtest_report import generate_backtest_report
 from training.validation.run_backtest import write_prediction_error_table
 from training.validation.schemas import (
@@ -277,6 +279,79 @@ class TestClaimExtraction:
         assert result.normalized_value is not None
         assert result.confidence >= 0.6
 
+    @pytest.mark.parametrize("phrase", [
+        "The company will discontinue development of ABC-101.",
+        "The board approved a strategic restructuring.",
+        "The sponsor will pause enrollment in the study.",
+        "The sponsor paused enrollment for safety review.",
+        "The company will terminate the study after review.",
+        "The company terminated the study due to futility.",
+        "The company will terminate development of ABC-101.",
+        "The company terminated development of ABC-101.",
+    ])
+    def test_extracts_program_discontinuation_variants(self, phrase):
+        result = extract_program_discontinuation(phrase)
+
+        assert result.normalized_value == "program_discontinuation"
+        assert result.confidence >= 0.6
+
+    @pytest.mark.parametrize("phrase", [
+        "Management paused before answering the question.",
+        "The lease may terminate at the end of the year.",
+    ])
+    def test_program_discontinuation_requires_trial_or_program_context(self, phrase):
+        result = extract_program_discontinuation(phrase)
+
+        assert result.normalized_value is None
+
+
+class TestHeuristicTaxonomyEngines:
+    def test_financing_strategy_outputs_bounded_probabilities(self):
+        result = estimate_financing_strategy(
+            months_to_catalyst=12,
+            simple_runway_months=9,
+            market_cap=600_000_000,
+            market_condition_score=7,
+            trial_phase="phase_2",
+            posterior_pos=0.45,
+            catalyst_type="primary_readout",
+            recent_positive_signal=True,
+            partnerability_score=0.6,
+        )
+
+        probs = [
+            result.p_proactive_clean_refinancing,
+            result.p_partnership_or_nondilutive,
+            result.p_distressed_financing,
+            result.p_cash_exhaustion,
+            result.p_dilutive_financing,
+            result.p_nondilutive_financing,
+        ]
+        assert all(0.0 <= p <= 1.0 for p in probs)
+        assert result.p_proactive_clean_refinancing + result.p_partnership_or_nondilutive + result.p_distressed_financing + result.p_cash_exhaustion <= 1.0
+        assert result.method_status == "heuristic"
+
+    def test_program_discontinuation_separates_scientific_and_financial_risk(self):
+        result = estimate_program_discontinuation(
+            modality="cell therapy",
+            disease_area="oncology",
+            trial_phase="phase_1",
+            trial_status="suspended",
+            endpoint_family="safety",
+            safety_sensitive_modality_score=0.8,
+            prior_human_signal=False,
+            open_label_design=True,
+            small_sample_size=True,
+            single_asset_dependency=0.9,
+            clinical_hold_or_safety_pause=True,
+            cash_runway_months=5,
+            posterior_pos=0.2,
+        )
+
+        assert result.p_scientific_discontinuation > result.p_financial_discontinuation
+        assert result.p_total_program_discontinuation >= result.p_scientific_discontinuation
+        assert result.method_status == "heuristic"
+
 
 class TestAIBacktestIntegration:
     def test_diagnose_errors_adds_csv_columns_and_report_section(self, tmp_path):
@@ -332,6 +407,8 @@ class TestAIBacktestIntegration:
                     proactive_financing_likelihood=0.6,
                     scientific_discontinuation_risk_score=0.2,
                     safety_sensitive_modality_score=0.7,
+                    false_negative_financing_event=True,
+                    partnership_not_captured=True,
                 ),
                 PerExampleBacktestResult(
                     example_id="ex-2",
@@ -376,7 +453,10 @@ class TestAIBacktestIntegration:
         assert "ai_method_status" in rows[0]
         assert "partnerability_score" in rows[0]
         assert rows[0]["partnerability_score"] == "0.800000"
+        assert "false_negative_financing_event" in rows[0]
+        assert "partnership_not_captured" in rows[0]
         assert "AI-Assisted Error Diagnosis" in report
+        assert "Diagnostic Flag Counts" in report
         assert "heuristic AI-assisted diagnosis" in report
 
 

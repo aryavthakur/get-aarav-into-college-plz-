@@ -38,6 +38,7 @@ from training.validation.schemas import (
 from training.validation.target_mapping import (
     extract_actual_label,
     mapped_probabilities,
+    probability_for_target,
 )
 
 
@@ -191,6 +192,16 @@ def _target_values(results: Iterable[PerExampleBacktestResult], target_name: str
                 continue
             y_true.append(int(row.actual_clinical_success))
             y_prob.append(row.posterior_mean_pos)
+        elif target_name in {
+            "reached_public_readout",
+            "reached_without_any_financing_event",
+            "reached_without_dilutive_financing",
+            "reached_without_distress",
+            "failed_before_readout_due_to_science",
+            "failed_before_readout_due_to_finance",
+        }:
+            y_true.append(int(row.extra_actual_labels.get(target_name, False)))
+            y_prob.append(float(row.extra_predicted_probabilities.get(target_name, 0.0)))
         else:
             raise ValueError(f"Unsupported backtest target: {target_name}")
     return y_true, y_prob
@@ -207,6 +218,8 @@ def _target_for_row(row: PerExampleBacktestResult, target_name: str) -> tuple[in
         return int(row.actual_reached_catalyst_before_financing_pressure), row.predicted_reaches_catalyst_before_financing_pressure
     if target_name == "clinical_success":
         return int(bool(row.actual_clinical_success)), row.posterior_mean_pos
+    if target_name in row.extra_actual_labels:
+        return int(row.extra_actual_labels[target_name]), float(row.extra_predicted_probabilities.get(target_name, 0.0))
     raise ValueError(f"Unsupported backtest target: {target_name}")
 
 
@@ -236,6 +249,22 @@ def run_backtest(
             clinical_success = False
         reached = bool(extract_actual_label(example, "reached_catalyst_before_financing_pressure"))
         mapped = mapped_probabilities(audit)
+        extra_targets = {
+            "reached_public_readout",
+            "reached_without_any_financing_event",
+            "reached_without_dilutive_financing",
+            "reached_without_distress",
+            "failed_before_readout_due_to_science",
+            "failed_before_readout_due_to_finance",
+        }
+        extra_actual = {
+            target: bool(extract_actual_label(example, target))
+            for target in extra_targets
+        }
+        extra_predicted = {
+            target: probability_for_target(audit, target)[0]
+            for target in extra_targets
+        }
         row_result = PerExampleBacktestResult(
             example_id=example.example_id,
             company_name=example.company_name,
@@ -255,6 +284,8 @@ def run_backtest(
             actual_program_discontinued_before_catalyst=example.program_discontinued_before_catalyst,
             actual_clinical_success=clinical_success,
             probability_mapping_note=str(mapped["probability_mapping_note"]),
+            extra_actual_labels=extra_actual,
+            extra_predicted_probabilities=extra_predicted,
         )
         if diagnose_errors:
             y_true, y_prob = _target_for_row(row_result, target_name)
@@ -294,6 +325,14 @@ def run_backtest(
                 "proactive_financing_likelihood": enrichment.proactive_financing_likelihood,
                 "scientific_discontinuation_risk_score": enrichment.scientific_discontinuation_risk_score,
                 "safety_sensitive_modality_score": enrichment.safety_sensitive_modality_score,
+                "false_negative_financing_event": example.financing_before_catalyst and row_result.predicted_financing_before_catalyst < 0.5,
+                "false_positive_financing_event": (not example.financing_before_catalyst) and row_result.predicted_financing_before_catalyst >= 0.5,
+                "false_negative_program_discontinuation": example.program_discontinued_before_catalyst and row_result.predicted_program_discontinuation < 0.5,
+                "false_positive_program_discontinuation": (not example.program_discontinued_before_catalyst) and row_result.predicted_program_discontinuation >= 0.5,
+                "scientific_failure_not_captured": example.program_discontinued_before_catalyst and row_result.predicted_program_discontinuation < 0.35,
+                "partnership_not_captured": example.financing_type == "partnership" and row_result.predicted_financing_before_catalyst < 0.5,
+                "clean_refi_not_captured": example.financing_type == "clean_refinancing" and row_result.predicted_financing_before_catalyst < 0.5,
+                "target_definition_ambiguous": example.actual_readout_date is not None and example.financing_before_catalyst,
             })
         per_example.append(row_result)
 
