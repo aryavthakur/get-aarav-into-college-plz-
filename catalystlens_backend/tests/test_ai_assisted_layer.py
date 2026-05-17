@@ -281,6 +281,7 @@ class TestClaimExtraction:
 
     @pytest.mark.parametrize("phrase", [
         "The company will discontinue development of ABC-101.",
+        "The board approved a strategic restructuring.",
         "The company announced a strategic restructuring to discontinue development of ABC-101.",
         "The company announced a strategic restructuring and pipeline prioritization.",
         "The company announced a strategic restructuring including pause of enrollment.",

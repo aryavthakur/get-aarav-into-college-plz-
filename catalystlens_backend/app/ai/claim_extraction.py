@@ -83,6 +83,20 @@ def extract_financing_event(text: str) -> AIExtractionResult:
 
 def extract_program_discontinuation(text: str) -> AIExtractionResult:
     lowered = text.lower()
+    negative_restructuring_context = (
+        "finance department",
+        "lease obligation",
+        "lease obligations",
+        "administrative operation",
+        "administrative operations",
+    )
+    if "strategic restructuring" in lowered and not any(
+        term in lowered for term in negative_restructuring_context
+    ):
+        match = re.search(r"(strategic restructuring[^.]*)", lowered, flags=re.IGNORECASE)
+        if match:
+            return _result(text, "program_discontinuation", match.group(1), "program_discontinuation", 0.65)
+
     patterns = [
         r"(discontinue development of [^.]+)",
         r"(strategic restructuring[^.]{0,120}?(?:discontinue development of|pipeline prioritization|pause(?:d)? (?:of )?enrollment|termination of the study|terminate(?:d)? the study)[^.]*)",
