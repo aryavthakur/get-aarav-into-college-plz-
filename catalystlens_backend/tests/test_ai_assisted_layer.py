@@ -281,13 +281,15 @@ class TestClaimExtraction:
 
     @pytest.mark.parametrize("phrase", [
         "The company will discontinue development of ABC-101.",
-        "The board approved a strategic restructuring.",
         "The sponsor will pause enrollment in the study.",
         "The sponsor paused enrollment for safety review.",
         "The company will terminate the study after review.",
         "The company terminated the study due to futility.",
         "The company will terminate development of ABC-101.",
         "The company terminated development of ABC-101.",
+        "The company announced a strategic restructuring to discontinue development of its pipeline.",
+        "The company completed a strategic restructuring and pipeline prioritization.",
+        "The board approved a strategic restructuring including termination of the trial.",
     ])
     def test_extracts_program_discontinuation_variants(self, phrase):
         result = extract_program_discontinuation(phrase)
@@ -298,6 +300,9 @@ class TestClaimExtraction:
     @pytest.mark.parametrize("phrase", [
         "Management paused before answering the question.",
         "The lease may terminate at the end of the year.",
+        "The company completed a strategic restructuring of its finance department.",
+        "The company restructured its lease obligations.",
+        "The board approved a strategic restructuring.",
     ])
     def test_program_discontinuation_requires_trial_or_program_context(self, phrase):
         result = extract_program_discontinuation(phrase)

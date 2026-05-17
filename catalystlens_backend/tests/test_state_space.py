@@ -19,6 +19,39 @@ from app.engines.state_space import (
 from app.engines.monte_carlo import run_full_audit
 
 
+# ---------------------------------------------------------------------------
+# Module-scoped fixture for TestStateSpaceIntegration
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def ss_audit():
+    from app.models.schemas import (
+        AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
+        DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
+    )
+    return run_full_audit(AuditRequest(
+        financial=CompanyFinancialInput(
+            company_name="SSCo", ticker="SSC",
+            cash_on_hand=18_000_000, marketable_securities=0,
+            quarterly_operating_cash_burn=4_000_000, market_cap=65_000_000,
+        ),
+        clinical=ClinicalCatalystInput(
+            asset_name="SSC-01", indication="CNS",
+            trial_phase="phase_2", trial_status="recruiting",
+            stated_months_to_catalyst=18,
+            enrollment_target=70, enrollment_completed=25,
+            enrollment_rate_per_month=4, number_of_sites=7,
+        ),
+        success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
+        valuation=ValuationInput(asset_value_success=180_000_000),
+        disclosure=DisclosureInput(
+            company_narrative_distribution={"runway_strength": 0.7, "clinical_timeline_confidence": 0.7, "dilution_risk": 0.3, "trial_maturity": 0.5, "endpoint_strength": 0.6, "pipeline_diversification": 0.4},
+            structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.4},
+        ),
+        simulation=SimulationConfig(n_simulations=300, random_seed=42, monthly_horizon=24),
+    ))
+
+
 class TestParticleFilterMath:
     def _params(self, n=500):
         return StateSpaceParams(n_particles=n)
@@ -118,52 +151,21 @@ class TestStateSpaceAnalysis:
 
 
 class TestStateSpaceIntegration:
-    def _request(self, n=300):
-        from app.models.schemas import (
-            AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
-            DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
-        )
-        return AuditRequest(
-            financial=CompanyFinancialInput(
-                company_name="SSCo", ticker="SSC",
-                cash_on_hand=18_000_000, marketable_securities=0,
-                quarterly_operating_cash_burn=4_000_000, market_cap=65_000_000,
-            ),
-            clinical=ClinicalCatalystInput(
-                asset_name="SSC-01", indication="CNS",
-                trial_phase="phase_2", trial_status="recruiting",
-                stated_months_to_catalyst=18,
-                enrollment_target=70, enrollment_completed=25,
-                enrollment_rate_per_month=4, number_of_sites=7,
-            ),
-            success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
-            valuation=ValuationInput(asset_value_success=180_000_000),
-            disclosure=DisclosureInput(
-                company_narrative_distribution={"runway_strength": 0.7, "clinical_timeline_confidence": 0.7, "dilution_risk": 0.3, "trial_maturity": 0.5, "endpoint_strength": 0.6, "pipeline_diversification": 0.4},
-                structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.4},
-            ),
-            simulation=SimulationConfig(n_simulations=n, random_seed=42, monthly_horizon=24),
-        )
+    def test_state_space_populated(self, ss_audit):
+        assert ss_audit.state_space is not None
 
-    def test_state_space_populated(self):
-        r = run_full_audit(self._request())
-        assert r.state_space is not None
-
-    def test_state_space_scores_in_unit_interval(self):
-        r = run_full_audit(self._request())
-        ss = r.state_space
+    def test_state_space_scores_in_unit_interval(self, ss_audit):
+        ss = ss_audit.state_space
         for attr in ["cash_health_score", "burn_acceleration_signal",
                      "clinical_progress_signal", "market_condition_signal", "anomaly_score"]:
             v = getattr(ss, attr)
             assert 0.0 <= v <= 1.0, f"{attr} = {v} out of [0, 1]"
 
-    def test_state_space_report_section(self):
-        r = run_full_audit(self._request())
-        assert "State-Space Model" in r.markdown_report
+    def test_state_space_report_section(self, ss_audit):
+        assert "State-Space Model" in ss_audit.markdown_report
 
-    def test_state_space_methodology_discloses_single_snapshot(self):
-        r = run_full_audit(self._request())
-        note = r.state_space.methodology_note.lower()
-        report = r.markdown_report.lower()
+    def test_state_space_methodology_discloses_single_snapshot(self, ss_audit):
+        note = ss_audit.state_space.methodology_note.lower()
+        report = ss_audit.markdown_report.lower()
         assert "single-snapshot" in note
         assert "not a fully dynamic historical filter" in report

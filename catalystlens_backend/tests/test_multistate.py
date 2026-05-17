@@ -21,6 +21,60 @@ from app.engines.cumulative_incidence import named_cif_at_time, survival_at_cata
 
 
 # ---------------------------------------------------------------------------
+# Module-scoped fixtures for TestMultiStateIntegration
+# ---------------------------------------------------------------------------
+
+def _multistate_request(use_multistate: bool = False, n: int = 300):
+    from app.models.schemas import (
+        AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
+        DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
+    )
+    return AuditRequest(
+        financial=CompanyFinancialInput(
+            company_name="MultiCo",
+            ticker="MLC",
+            cash_on_hand=20_000_000,
+            marketable_securities=0,
+            quarterly_operating_cash_burn=5_000_000,
+            market_cap=80_000_000,
+        ),
+        clinical=ClinicalCatalystInput(
+            asset_name="MLC-01",
+            indication="Oncology",
+            trial_phase="phase_2",
+            trial_status="recruiting",
+            stated_months_to_catalyst=18,
+            enrollment_target=80,
+            enrollment_completed=30,
+            enrollment_rate_per_month=5,
+            number_of_sites=8,
+        ),
+        success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
+        valuation=ValuationInput(asset_value_success=200_000_000),
+        disclosure=DisclosureInput(
+            company_narrative_distribution={"runway_strength": 0.6, "clinical_timeline_confidence": 0.6, "dilution_risk": 0.4, "trial_maturity": 0.5, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
+            structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
+        ),
+        simulation=SimulationConfig(
+            n_simulations=n, random_seed=42, monthly_horizon=24,
+            use_multistate=use_multistate,
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
+def ms_disabled_audit():
+    from app.engines.monte_carlo import run_full_audit
+    return run_full_audit(_multistate_request(use_multistate=False, n=300))
+
+
+@pytest.fixture(scope="module")
+def ms_enabled_audit():
+    from app.engines.monte_carlo import run_full_audit
+    return run_full_audit(_multistate_request(use_multistate=True, n=500))
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -235,52 +289,13 @@ class TestCumulativeIncidenceAPI:
 # ---------------------------------------------------------------------------
 
 class TestMultiStateIntegration:
-    def _make_request(self, use_multistate: bool = False, n: int = 500):
-        from app.models.schemas import (
-            AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
-            DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
-        )
-        return AuditRequest(
-            financial=CompanyFinancialInput(
-                company_name="MultiCo",
-                ticker="MLC",
-                cash_on_hand=20_000_000,
-                marketable_securities=0,
-                quarterly_operating_cash_burn=5_000_000,
-                market_cap=80_000_000,
-            ),
-            clinical=ClinicalCatalystInput(
-                asset_name="MLC-01",
-                indication="Oncology",
-                trial_phase="phase_2",
-                trial_status="recruiting",
-                stated_months_to_catalyst=18,
-                enrollment_target=80,
-                enrollment_completed=30,
-                enrollment_rate_per_month=5,
-                number_of_sites=8,
-            ),
-            success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
-            valuation=ValuationInput(asset_value_success=200_000_000),
-            disclosure=DisclosureInput(
-                company_narrative_distribution={"runway_strength": 0.6, "clinical_timeline_confidence": 0.6, "dilution_risk": 0.4, "trial_maturity": 0.5, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
-                structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
-            ),
-            simulation=SimulationConfig(
-                n_simulations=n, random_seed=42, monthly_horizon=24,
-                use_multistate=use_multistate,
-            ),
-        )
-
-    def test_multistate_disabled_gives_none(self):
-        from app.engines.monte_carlo import run_full_audit
-        r = run_full_audit(self._make_request(use_multistate=False))
+    def test_multistate_disabled_gives_none(self, ms_disabled_audit):
+        r = ms_disabled_audit
         assert r.multi_state is None
         assert "Multi-state engine available but not active for this audit." in r.markdown_report
 
-    def test_multistate_enabled_gives_result(self):
-        from app.engines.monte_carlo import run_full_audit
-        r = run_full_audit(self._make_request(use_multistate=True, n=500))
+    def test_multistate_enabled_gives_result(self, ms_enabled_audit):
+        r = ms_enabled_audit
         assert r.multi_state is not None
         assert r.multi_state.method_status == "uncalibrated_assumption"
         assert "Multi-State" in r.markdown_report
@@ -288,7 +303,7 @@ class TestMultiStateIntegration:
 
     def test_absorbing_state_probs_are_valid(self):
         from app.engines.monte_carlo import run_full_audit
-        r = run_full_audit(self._make_request(use_multistate=True, n=1000))
+        r = run_full_audit(_multistate_request(use_multistate=True, n=1000))
         ms = r.multi_state
         assert ms is not None
         for name, p in ms.absorbing_state_probs.items():
@@ -296,16 +311,12 @@ class TestMultiStateIntegration:
         total = sum(ms.absorbing_state_probs.values()) + ms.overall_survival_at_horizon
         assert abs(total - 1.0) <= 0.01, f"State probs don't sum to 1: {total}"
 
-    def test_cif_at_catalyst_keys_are_cause_names(self):
-        from app.engines.monte_carlo import run_full_audit
-        r = run_full_audit(self._make_request(use_multistate=True, n=500))
-        ms = r.multi_state
+    def test_cif_at_catalyst_keys_are_cause_names(self, ms_enabled_audit):
+        ms = ms_enabled_audit.multi_state
         assert ms is not None
         assert set(ms.cif_at_catalyst_month.keys()) == set(CAUSE_NAMES.values())
 
-    def test_survival_at_catalyst_is_in_unit_interval(self):
-        from app.engines.monte_carlo import run_full_audit
-        r = run_full_audit(self._make_request(use_multistate=True, n=500))
-        assert r.multi_state is not None
-        s = r.multi_state.overall_survival_at_catalyst_month
+    def test_survival_at_catalyst_is_in_unit_interval(self, ms_enabled_audit):
+        assert ms_enabled_audit.multi_state is not None
+        s = ms_enabled_audit.multi_state.overall_survival_at_catalyst_month
         assert s is not None and 0.0 <= s <= 1.0
