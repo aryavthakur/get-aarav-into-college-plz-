@@ -7,6 +7,7 @@ All tests use mocks. No real Groq, OpenRouter, or Ollama calls are made.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -81,21 +82,21 @@ def _make_mock_client(post_map: dict, get_map: dict | None = None):
 # ---------------------------------------------------------------------------
 
 class TestAiHealth:
-    async def test_returns_groq_when_key_set(self, monkeypatch):
+    def test_returns_groq_when_key_set(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "fake-groq-key")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "")
-        result = await lc.ai_health()
+        result = asyncio.run(lc.ai_health())
         assert result == {"status": "ok", "provider": "groq"}
 
-    async def test_returns_openrouter_when_only_openrouter_set(self, monkeypatch):
+    def test_returns_openrouter_when_only_openrouter_set(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "fake-or-key")
-        result = await lc.ai_health()
+        result = asyncio.run(lc.ai_health())
         assert result == {"status": "ok", "provider": "openrouter"}
 
-    async def test_returns_unavailable_when_no_provider(self, monkeypatch):
+    def test_returns_unavailable_when_no_provider(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "")
@@ -105,10 +106,10 @@ class TestAiHealth:
             "AsyncClient",
             _make_mock_client(post_map={}, get_map={"/api/tags": (503, {})}),
         )
-        result = await lc.ai_health()
+        result = asyncio.run(lc.ai_health())
         assert result == {"status": "unavailable", "provider": None}
 
-    async def test_returns_ollama_when_reachable(self, monkeypatch):
+    def test_returns_ollama_when_reachable(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "")
@@ -117,10 +118,10 @@ class TestAiHealth:
             "AsyncClient",
             _make_mock_client(post_map={}, get_map={"/api/tags": (200, {"models": []})}),
         )
-        result = await lc.ai_health()
+        result = asyncio.run(lc.ai_health())
         assert result == {"status": "ok", "provider": "ollama"}
 
-    async def test_returns_unavailable_when_ollama_connection_error(self, monkeypatch):
+    def test_returns_unavailable_when_ollama_connection_error(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "")
@@ -139,7 +140,7 @@ class TestAiHealth:
                 raise httpx.ConnectError("refused")
 
         monkeypatch.setattr(lc.httpx, "AsyncClient", _ErrorClient)
-        result = await lc.ai_health()
+        result = asyncio.run(lc.ai_health())
         assert result == {"status": "unavailable", "provider": None}
 
 
@@ -148,7 +149,7 @@ class TestAiHealth:
 # ---------------------------------------------------------------------------
 
 class TestCallAIFallback:
-    async def test_groq_429_falls_through_to_openrouter(self, monkeypatch):
+    def test_groq_429_falls_through_to_openrouter(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "fake-groq")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "fake-or")
@@ -163,10 +164,10 @@ class TestCallAIFallback:
                 }
             ),
         )
-        result = await lc.call_ai("test prompt")
+        result = asyncio.run(lc.call_ai("test prompt"))
         assert result == "OpenRouter result"
 
-    async def test_openrouter_all_429_falls_to_ollama(self, monkeypatch):
+    def test_openrouter_all_429_falls_to_ollama(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "fake-or")
@@ -181,10 +182,10 @@ class TestCallAIFallback:
                 }
             ),
         )
-        result = await lc.call_ai("test prompt")
+        result = asyncio.run(lc.call_ai("test prompt"))
         assert result == "Ollama result"
 
-    async def test_groq_200_returns_immediately(self, monkeypatch):
+    def test_groq_200_returns_immediately(self, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "fake-groq")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "")
@@ -196,10 +197,10 @@ class TestCallAIFallback:
                 post_map={"groq.com": (200, _openai_ok("Groq result"))}
             ),
         )
-        result = await lc.call_ai("test prompt")
+        result = asyncio.run(lc.call_ai("test prompt"))
         assert result == "Groq result"
 
-    async def test_no_provider_raises_503(self, monkeypatch):
+    def test_no_provider_raises_503(self, monkeypatch):
         import app.ai.llm_client as lc
         from fastapi import HTTPException
 
@@ -224,10 +225,10 @@ class TestCallAIFallback:
 
         monkeypatch.setattr(lc.httpx, "AsyncClient", _UnreachableClient)
         with pytest.raises(HTTPException) as exc_info:
-            await lc.call_ai("test prompt")
+            asyncio.run(lc.call_ai("test prompt"))
         assert exc_info.value.status_code == 503
 
-    async def test_groq_502_propagates(self, monkeypatch):
+    def test_groq_502_propagates(self, monkeypatch):
         import app.ai.llm_client as lc
         from fastapi import HTTPException
 
@@ -239,10 +240,10 @@ class TestCallAIFallback:
             _make_mock_client(post_map={"groq.com": (500, {})}),
         )
         with pytest.raises(HTTPException) as exc_info:
-            await lc.call_ai("test prompt")
+            asyncio.run(lc.call_ai("test prompt"))
         assert exc_info.value.status_code == 502
 
-    async def test_openrouter_tries_next_model_on_429(self, monkeypatch):
+    def test_openrouter_tries_next_model_on_429(self, monkeypatch):
         """First OpenRouter model returns 429; second returns 200."""
         import app.ai.llm_client as lc
 
@@ -269,11 +270,11 @@ class TestCallAIFallback:
                 return _MockResponse(200, _openai_ok("Second model result"))
 
         monkeypatch.setattr(lc.httpx, "AsyncClient", _SequentialClient)
-        result = await lc.call_ai("test prompt")
+        result = asyncio.run(lc.call_ai("test prompt"))
         assert result == "Second model result"
         assert call_count["n"] == 2
 
-    async def test_falls_through_to_ollama_when_groq_openrouter_unavailable(self, monkeypatch):
+    def test_falls_through_to_ollama_when_groq_openrouter_unavailable(self, monkeypatch):
         """Groq not configured, OpenRouter all 429 → Ollama succeeds."""
         import app.ai.llm_client as lc
 
@@ -290,10 +291,10 @@ class TestCallAIFallback:
                 }
             ),
         )
-        result = await lc.call_ai("test prompt")
+        result = asyncio.run(lc.call_ai("test prompt"))
         assert result == "Ollama fallback result"
 
-    async def test_ollama_non_200_falls_to_503(self, monkeypatch):
+    def test_ollama_non_200_falls_to_503(self, monkeypatch):
         """Ollama returns non-200 → should fall through to 503, not raise 502."""
         import app.ai.llm_client as lc
         from fastapi import HTTPException
@@ -306,10 +307,10 @@ class TestCallAIFallback:
             _make_mock_client(post_map={"localhost": (500, {})}),
         )
         with pytest.raises(HTTPException) as exc_info:
-            await lc.call_ai("test prompt")
+            asyncio.run(lc.call_ai("test prompt"))
         assert exc_info.value.status_code == 503
 
-    async def test_no_api_key_in_error_messages(self, monkeypatch):
+    def test_no_api_key_in_error_messages(self, monkeypatch):
         """API keys must never appear in exception detail strings."""
         import app.ai.llm_client as lc
         from fastapi import HTTPException
@@ -323,7 +324,7 @@ class TestCallAIFallback:
             _make_mock_client(post_map={"groq.com": (500, {})}),
         )
         with pytest.raises(HTTPException) as exc_info:
-            await lc.call_ai("test prompt")
+            asyncio.run(lc.call_ai("test prompt"))
         assert fake_key not in str(exc_info.value.detail)
 
 
@@ -647,7 +648,7 @@ class TestAuditUnchangedWithoutLLM:
 # ---------------------------------------------------------------------------
 
 class TestNoAPIKeyInOutputs:
-    async def test_no_api_key_in_502_detail(self, monkeypatch):
+    def test_no_api_key_in_502_detail(self, monkeypatch):
         import app.ai.llm_client as lc
         from fastapi import HTTPException
 
@@ -660,6 +661,6 @@ class TestNoAPIKeyInOutputs:
             _make_mock_client(post_map={"groq.com": (500, {})}),
         )
         with pytest.raises(HTTPException) as exc_info:
-            await lc.call_ai("test")
+            asyncio.run(lc.call_ai("test"))
         assert secret not in str(exc_info.value.detail)
         assert secret not in repr(exc_info.value)
