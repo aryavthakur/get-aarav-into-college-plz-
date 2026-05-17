@@ -11,8 +11,9 @@ Provider priority:
 3. Ollama  (OLLAMA_URL, default http://localhost:11434)
 
 Rate-limit (429) causes fallthrough to the next provider / next model.
-Other non-200 HTTP responses raise HTTPException(502).
-No provider available raises HTTPException(503).
+Non-200 non-429 from Groq or OpenRouter raises HTTPException(502).
+Ollama non-200 or connection failure falls through to HTTPException(503).
+If no provider succeeds, raises HTTPException(503).
 API keys are never logged or returned in responses.
 """
 
@@ -30,16 +31,22 @@ from fastapi import HTTPException
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 OPENROUTER_API_KEY: str = os.environ.get("OPENROUTER_API_KEY", "")
 OLLAMA_URL: str = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "llama3.2")
 
-_GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
-_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-_OPENROUTER_MODELS = [
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODELS = [
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-3-27b-it:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
 ]
+
+_SYSTEM_MESSAGE = (
+    "You are a careful biotech-finance diligence assistant. "
+    "Do not provide investment advice."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +56,11 @@ _OPENROUTER_MODELS = [
 def _openai_payload(model: str, prompt: str) -> dict:
     return {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": 2048,
+        "messages": [
+            {"role": "system", "content": _SYSTEM_MESSAGE},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
     }
 
 
@@ -67,10 +76,12 @@ async def call_ai(prompt: str, timeout: float = 60.0) -> str:
     """
     Call the first available LLM provider in order: Groq → OpenRouter → Ollama.
 
-    - 429 from any provider causes fallthrough to the next provider/model.
-    - Other non-200 responses raise HTTPException(502).
-    - Connection errors cause fallthrough (provider unavailable).
+    - 429 from Groq falls through to OpenRouter.
+    - 429 from an OpenRouter model tries the next model; all 429 falls to Ollama.
+    - Other non-200 from Groq or OpenRouter raises HTTPException(502).
+    - Ollama non-200 or connection failure falls through to the final 503.
     - If no provider succeeds, raises HTTPException(503).
+    - API keys never appear in error messages or responses.
     """
     async with httpx.AsyncClient(timeout=timeout) as client:
 
@@ -80,17 +91,17 @@ async def call_ai(prompt: str, timeout: float = 60.0) -> str:
         if GROQ_API_KEY:
             try:
                 resp = await client.post(
-                    _GROQ_ENDPOINT,
+                    GROQ_ENDPOINT,
                     headers={
                         "Authorization": f"Bearer {GROQ_API_KEY}",
                         "Content-Type": "application/json",
                     },
-                    json=_openai_payload(_GROQ_MODEL, prompt),
+                    json=_openai_payload(GROQ_MODEL, prompt),
                 )
                 if resp.status_code == 200:
                     return _extract_openai_text(resp.json())
                 if resp.status_code != 429:
-                    raise HTTPException(502, f"Groq returned HTTP {resp.status_code}")
+                    raise HTTPException(502, "Groq provider error.")
                 # 429 → fall through to OpenRouter
             except HTTPException:
                 raise
@@ -101,13 +112,15 @@ async def call_ai(prompt: str, timeout: float = 60.0) -> str:
         # 2. OpenRouter — tries models in order; 429 tries next model
         # ------------------------------------------------------------------
         if OPENROUTER_API_KEY:
-            for model in _OPENROUTER_MODELS:
+            for model in OPENROUTER_MODELS:
                 try:
                     resp = await client.post(
-                        _OPENROUTER_ENDPOINT,
+                        OPENROUTER_ENDPOINT,
                         headers={
                             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                             "Content-Type": "application/json",
+                            "HTTP-Referer": "https://catalystlens.local",
+                            "X-Title": "CatalystLens",
                         },
                         json=_openai_payload(model, prompt),
                     )
@@ -115,50 +128,50 @@ async def call_ai(prompt: str, timeout: float = 60.0) -> str:
                         return _extract_openai_text(resp.json())
                     if resp.status_code == 429:
                         continue  # try next model
-                    raise HTTPException(502, f"OpenRouter returned HTTP {resp.status_code}")
+                    raise HTTPException(502, "OpenRouter provider error.")
                 except HTTPException:
                     raise
                 except httpx.HTTPError:
-                    break  # connection error — skip remaining OR models
+                    break  # connection error — skip remaining OR models, try Ollama
 
         # ------------------------------------------------------------------
-        # 3. Ollama (local)
+        # 3. Ollama (local) — non-200 and connection errors fall through
         # ------------------------------------------------------------------
         try:
             resp = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": "llama3.2", "prompt": prompt, "stream": False},
+                f"{OLLAMA_URL.rstrip('/')}/api/generate",
+                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
             )
             if resp.status_code == 200:
                 return resp.json().get("response", "")
-            raise HTTPException(502, f"Ollama returned HTTP {resp.status_code}")
-        except HTTPException:
-            raise
+            # non-200 → fall through to 503
         except httpx.HTTPError:
             pass  # Ollama not reachable
 
     raise HTTPException(503, "No AI provider available.")
 
 
-async def ai_health() -> dict:
+async def ai_health(timeout: float = 3.0) -> dict:
     """
     Return the first configured / reachable AI provider.
+
+    Never exposes whether a key value is malformed or its content.
 
     Returns:
         {"status": "ok", "provider": "groq"}        — if GROQ_API_KEY is set
         {"status": "ok", "provider": "openrouter"}   — if OPENROUTER_API_KEY is set
         {"status": "ok", "provider": "ollama"}       — if Ollama /api/tags responds 200
-        {"status": "unavailable"}                    — nothing reachable
+        {"status": "unavailable", "provider": None}  — nothing reachable
     """
     if GROQ_API_KEY:
         return {"status": "ok", "provider": "groq"}
     if OPENROUTER_API_KEY:
         return {"status": "ok", "provider": "openrouter"}
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OLLAMA_URL}/api/tags")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{OLLAMA_URL.rstrip('/')}/api/tags")
             if resp.status_code == 200:
                 return {"status": "ok", "provider": "ollama"}
     except httpx.HTTPError:
         pass
-    return {"status": "unavailable"}
+    return {"status": "unavailable", "provider": None}

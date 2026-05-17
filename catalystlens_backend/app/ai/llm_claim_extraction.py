@@ -4,7 +4,7 @@ LLM-assisted structured claim extraction from biotech filings.
 GUARDRAIL: Extracted claims are for diligence support only. They must not
 overwrite CatalystLens core model probabilities or investment conclusions.
 All extractions with confidence < 0.70 are automatically flagged for human
-review. Parse failures also return a safe error dict with requires_human_review=True.
+review. Parse failures return a safe error dict with requires_human_review=True.
 """
 
 from __future__ import annotations
@@ -14,11 +14,35 @@ import re
 
 from app.ai.llm_client import call_ai
 
-_EXTRACTION_PROMPT_TEMPLATE = """\
-You are a structured data extraction assistant for biotech regulatory filings.
+_REQUIRED_KEYS = [
+    "runway_claim",
+    "normalized_runway_date",
+    "catalyst_claim",
+    "normalized_catalyst_date",
+    "financing_event_claim",
+    "financing_event_type",
+    "program_discontinuation_claim",
+    "safety_or_clinical_hold_claim",
+    "evidence_spans",
+    "confidence",
+    "requires_human_review",
+    "method_status",
+    "source_url",
+]
 
-Extract the following fields from the provided source text and return ONLY valid JSON \
-with no preamble or explanation:
+_EXTRACTION_PROMPT_TEMPLATE = """\
+You are extracting source-grounded biotech-finance claims for CatalystLens.
+
+Rules:
+- Return valid JSON only.
+- Extract only claims explicitly supported by the text.
+- Do not infer hidden facts.
+- Do not provide investment advice.
+- Do not estimate final model probabilities.
+- Preserve evidence spans from the source text.
+- If uncertain, set requires_human_review to true.
+
+Return exactly this JSON shape:
 
 {{
   "runway_claim": "verbatim quote or null",
@@ -36,12 +60,7 @@ with no preamble or explanation:
   "source_url": null
 }}
 
-Rules:
-- Only extract claims directly supported by the source text.
-- confidence is a float between 0.0 and 1.0.
-- Set requires_human_review=true whenever confidence < 0.70.
-- Do not invent claims not present in the source.
-- Return valid JSON only — no markdown fences, no explanation.
+No markdown fences. No explanation. Valid JSON only.
 
 Source text:
 {text}\
@@ -56,9 +75,10 @@ async def llm_extract_claims(
     Use LLM to extract structured claims from a biotech source text.
 
     - Returns a dict matching the extraction schema.
+    - Missing required keys are filled with null / safe defaults.
     - confidence < 0.70 forces requires_human_review=True.
+    - source_url from the function argument always overwrites the model value.
     - JSON parse failure returns a safe error dict with requires_human_review=True.
-    - source_url is injected into the result if not returned by the model.
     """
     prompt = _EXTRACTION_PROMPT_TEMPLATE.format(text=text)
     if source_url:
@@ -74,6 +94,7 @@ async def llm_extract_claims(
             "parse_error": True,
             "requires_human_review": True,
             "method_status": "llm_assisted_claim_extraction_parse_failed",
+            "source_url": source_url,
         }
 
     try:
@@ -84,17 +105,22 @@ async def llm_extract_claims(
             "parse_error": True,
             "requires_human_review": True,
             "method_status": "llm_assisted_claim_extraction_parse_failed",
+            "source_url": source_url,
         }
 
+    # Fill any missing required keys with null / safe defaults
+    for key in _REQUIRED_KEYS:
+        if key not in result:
+            result[key] = [] if key == "evidence_spans" else None
+
     # Clamp confidence to [0, 1] and enforce human-review flag
-    confidence = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
+    confidence = max(0.0, min(1.0, float(result.get("confidence") or 0.0)))
     result["confidence"] = confidence
     if confidence < 0.70:
         result["requires_human_review"] = True
 
-    # Inject source_url if the model left it null
-    if source_url and not result.get("source_url"):
-        result["source_url"] = source_url
-
+    # Always overwrite method_status and source_url from authoritative sources
     result["method_status"] = "llm_assisted_claim_extraction"
+    result["source_url"] = source_url
+
     return result

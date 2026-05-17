@@ -84,8 +84,10 @@ def extract_financing_event(text: str) -> AIExtractionResult:
 # Terms that confirm a "strategic restructuring" is about a clinical program,
 # not a finance/admin/lease/HR restructuring.
 _STRATEGIC_RESTRUCTURING_CONTEXT = re.compile(
-    r"\b(?:discontinue\s+development|terminate\s+development|"
-    r"terminate\s+the\s+study|termination\s+of\s+the\s+study|"
+    r"\b(?:discontinue\s+development|discontinued\s+development|"
+    r"terminate\s+development|terminated\s+development|"
+    r"terminate\s+the\s+study|terminated\s+the\s+study|"
+    r"termination\s+of\s+the\s+study|"
     r"pause\s+enrollment|paused\s+enrollment|pipeline\s+prioritization|"
     r"clinical\s+hold|trial|program|study|development|enrollment|asset)\b",
     flags=re.IGNORECASE,

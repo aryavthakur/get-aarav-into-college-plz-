@@ -102,7 +102,7 @@ class TestAiHealth:
             _make_mock_client(post_map={}, get_map={"/api/tags": (503, {})}),
         )
         result = await lc.ai_health()
-        assert result == {"status": "unavailable"}
+        assert result == {"status": "unavailable", "provider": None}
 
     async def test_returns_ollama_when_reachable(self, monkeypatch):
         import app.ai.llm_client as lc
@@ -136,7 +136,7 @@ class TestAiHealth:
 
         monkeypatch.setattr(lc.httpx, "AsyncClient", _ErrorClient)
         result = await lc.ai_health()
-        assert result == {"status": "unavailable"}
+        assert result == {"status": "unavailable", "provider": None}
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +238,73 @@ class TestCallAIFallback:
             await lc.call_ai("test prompt")
         assert exc_info.value.status_code == 502
 
+    async def test_openrouter_tries_next_model_on_429(self, monkeypatch):
+        """First OpenRouter model returns 429; second returns 200."""
+        import app.ai.llm_client as lc
+
+        monkeypatch.setattr(lc, "GROQ_API_KEY", "")
+        monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "fake-or")
+
+        call_count = {"n": 0}
+
+        class _SequentialClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def post(self, url, **kw):
+                call_count["n"] += 1
+                # First call → 429; second call → 200
+                if call_count["n"] == 1:
+                    return _MockResponse(429, {})
+                return _MockResponse(200, _openai_ok("Second model result"))
+
+        monkeypatch.setattr(lc.httpx, "AsyncClient", _SequentialClient)
+        result = await lc.call_ai("test prompt")
+        assert result == "Second model result"
+        assert call_count["n"] == 2
+
+    async def test_falls_through_to_ollama_when_groq_openrouter_unavailable(self, monkeypatch):
+        """Groq not configured, OpenRouter all 429 → Ollama succeeds."""
+        import app.ai.llm_client as lc
+
+        monkeypatch.setattr(lc, "GROQ_API_KEY", "")
+        monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "fake-or")
+
+        monkeypatch.setattr(
+            lc.httpx,
+            "AsyncClient",
+            _make_mock_client(
+                post_map={
+                    "openrouter.ai": (429, {}),
+                    "localhost": (200, {"response": "Ollama fallback result"}),
+                }
+            ),
+        )
+        result = await lc.call_ai("test prompt")
+        assert result == "Ollama fallback result"
+
+    async def test_ollama_non_200_falls_to_503(self, monkeypatch):
+        """Ollama returns non-200 → should fall through to 503, not raise 502."""
+        import app.ai.llm_client as lc
+        from fastapi import HTTPException
+
+        monkeypatch.setattr(lc, "GROQ_API_KEY", "")
+        monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "")
+        monkeypatch.setattr(
+            lc.httpx,
+            "AsyncClient",
+            _make_mock_client(post_map={"localhost": (500, {})}),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await lc.call_ai("test prompt")
+        assert exc_info.value.status_code == 503
+
     async def test_no_api_key_in_error_messages(self, monkeypatch):
         """API keys must never appear in exception detail strings."""
         import app.ai.llm_client as lc
@@ -285,6 +352,7 @@ class TestLambdaHealthRoute:
         )
         data = client.get("/lambda-health").json()
         assert data["status"] == "unavailable"
+        assert data["provider"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -399,13 +467,14 @@ class TestExtractClaimsRoute:
         monkeypatch.setattr(lce, "call_ai", _mock_call_ai)
         response = client.post(
             "/ai/extract-claims",
-            json={"text": "Some filing text."},
+            json={"text": "Some filing text.", "source_url": "https://sec.gov/test.htm"},
         )
         assert response.status_code == 200
         data = response.json()
         assert data["parse_error"] is True
         assert data["requires_human_review"] is True
         assert data["method_status"] == "llm_assisted_claim_extraction_parse_failed"
+        assert data["source_url"] == "https://sec.gov/test.htm"
 
     def test_extract_claims_handles_malformed_json_safely(self, monkeypatch):
         import app.ai.llm_claim_extraction as lce
