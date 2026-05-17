@@ -1212,6 +1212,28 @@ Parameters are untrained MVP assumptions unless a calibrated artifact is registe
 # Master report assembler
 # ---------------------------------------------------------------------------
 
+def _ai_feature_enrichment_section(r: AuditResponse) -> str:
+    ai = r.ai_feature_enrichment
+    if ai is None:
+        return ""
+    return f"""## AI-Assisted Feature Enrichment
+
+**Method status:** `{ai.method_status}`
+
+| Candidate feature | Heuristic score |
+|---|---:|
+| Partnerability score | {_fmt_pct(ai.partnerability_score or 0.0)} |
+| Proactive financing likelihood | {_fmt_pct(ai.proactive_financing_likelihood or 0.0)} |
+| Scientific discontinuation risk score | {_fmt_pct(ai.scientific_discontinuation_risk_score or 0.0)} |
+| Safety-sensitive modality score | {_fmt_pct(ai.safety_sensitive_modality_score or 0.0)} |
+| Management narrative optimism score | {_fmt_pct(ai.management_narrative_optimism_score or 0.0)} |
+| Source grounding quality | {_fmt_pct(ai.source_grounding_quality or 0.0)} |
+
+{ai.explanation}
+
+These AI-assisted scores are heuristic feature enrichment only. They do not overwrite core model probabilities, require human/source verification, and are not investment advice."""
+
+
 def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
     """
     Assemble the complete institutional diligence report as Markdown.
@@ -1222,6 +1244,7 @@ def generate_full_report(r: AuditResponse, req: AuditRequest) -> str:
         _header(r, req),
         _data_quality_section(r),
         _model_validation_section(r),
+        _ai_feature_enrichment_section(r),
         _financial_clock_decomposition_section(r),
         _planned_financing_section(req, r),
         _executive_summary(r, req),

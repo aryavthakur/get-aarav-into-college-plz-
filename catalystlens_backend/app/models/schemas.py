@@ -7,6 +7,8 @@ from __future__ import annotations
 from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.ai.schemas import AIFeatureEnrichment
+
 
 # ---------------------------------------------------------------------------
 # Helper types
@@ -222,6 +224,13 @@ class SimulationConfig(BaseModel):
         description=(
             "Enable multi-state competing-risk engine (8 absorbing states). "
             "When False, uses the legacy binary Cox-Weibull sampler."
+        ),
+    )
+    use_ai_feature_enrichment: bool = Field(
+        False,
+        description=(
+            "Enable deterministic AI-assisted feature enrichment. Scores are reported "
+            "as heuristic candidate features and do not overwrite core probabilities."
         ),
     )
 
@@ -712,6 +721,7 @@ class AuditResponse(BaseModel):
     bma: Optional[BMAResult] = None
     dependence: Optional[DependenceAnalysisResult] = None
     state_space: Optional[StateSpaceResult] = None
+    ai_feature_enrichment: Optional[AIFeatureEnrichment] = None
     warnings: List[str]
     assumptions: List[str]
     markdown_report: str
