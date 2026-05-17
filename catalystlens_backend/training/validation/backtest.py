@@ -9,6 +9,7 @@ from typing import Iterable
 import numpy as np
 
 from app.ai.error_diagnosis import diagnose_prediction_error
+from app.ai.feature_enrichment import enrich_company_features
 from app.engines.monte_carlo import run_full_audit
 from app.models.schemas import (
     AuditRequest,
@@ -257,7 +258,7 @@ def run_backtest(
         )
         if diagnose_errors:
             y_true, y_prob = _target_for_row(row_result, target_name)
-            diagnosis = diagnose_prediction_error({
+            diagnosis_context = {
                 "example_id": example.example_id,
                 "company_name": example.company_name,
                 "ticker": example.ticker,
@@ -265,12 +266,23 @@ def run_backtest(
                 "y_true": y_true,
                 "y_prob": y_prob,
                 "absolute_error": abs(y_prob - y_true),
+                "simple_runway_months": audit.solvency.simple_runway_months,
+                "market_cap": example.market_cap,
+                "debt": example.debt,
+                "trial_phase": example.trial_phase,
                 "financing_type": example.financing_type,
                 "trial_status": example.trial_status,
-                "modality": example.modality,
                 "disease_area": example.disease_area,
+                "modality": example.modality,
+                "endpoint_family": example.endpoint_family,
                 "clinical_outcome": example.clinical_outcome,
-            })
+                "cash_distress_or_going_concern_before_catalyst": example.cash_distress_or_going_concern_before_catalyst,
+                "program_discontinued_before_catalyst": example.program_discontinued_before_catalyst,
+                "actual_readout_date": example.actual_readout_date.isoformat() if example.actual_readout_date else None,
+                "posterior_pos": audit.success_probability.posterior_mean,
+            }
+            diagnosis = diagnose_prediction_error(diagnosis_context)
+            enrichment = enrich_company_features(diagnosis_context)
             row_result = row_result.model_copy(update={
                 "error_type": diagnosis.error_type,
                 "diagnosed_failure_mode": diagnosis.diagnosed_failure_mode,
@@ -278,6 +290,10 @@ def run_backtest(
                 "suggested_model_patch": diagnosis.suggested_model_patch,
                 "ai_diagnosis_confidence": diagnosis.confidence,
                 "ai_method_status": diagnosis.method_status,
+                "partnerability_score": enrichment.partnerability_score,
+                "proactive_financing_likelihood": enrichment.proactive_financing_likelihood,
+                "scientific_discontinuation_risk_score": enrichment.scientific_discontinuation_risk_score,
+                "safety_sensitive_modality_score": enrichment.safety_sensitive_modality_score,
             })
         per_example.append(row_result)
 

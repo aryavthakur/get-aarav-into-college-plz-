@@ -1,4 +1,5 @@
 import csv
+from datetime import datetime, timezone
 
 import pytest
 
@@ -21,12 +22,14 @@ from app.ai.claim_extraction import (
 from app.ai.error_diagnosis import diagnose_prediction_error
 from app.ai.feature_enrichment import enrich_company_features
 from app.ai.schemas import AIBacktestErrorDiagnosis, AIExtractionResult
-from training.validation.backtest import load_historical_examples, run_backtest
 from training.validation.backtest_report import generate_backtest_report
 from training.validation.run_backtest import write_prediction_error_table
-
-
-DATASET_PATH = "training/datasets/example_historical_biotech_panel.csv"
+from training.validation.schemas import (
+    BacktestMetricSummary,
+    BacktestResult,
+    CalibrationBucket,
+    PerExampleBacktestResult,
+)
 
 
 def _audit_request(use_ai: bool = False) -> AuditRequest:
@@ -162,6 +165,44 @@ class TestAIErrorDiagnosis:
         assert result.diagnosed_failure_mode == "scientific_discontinuation_underpredicted"
         assert "modality_safety_prior" in result.likely_missing_features
 
+    def test_identifies_moderate_clean_financing_false_negative(self):
+        result = diagnose_prediction_error({
+            "example_id": "ex-4",
+            "company_name": "Clean Moderate Bio",
+            "ticker": "CMB",
+            "target": "financing_before_catalyst",
+            "y_true": 1,
+            "y_prob": 0.42,
+            "financing_type": "clean_refinancing",
+        })
+
+        assert result.diagnosed_failure_mode == "proactive_financing_underpredicted"
+
+    def test_identifies_moderate_partnership_false_negative(self):
+        result = diagnose_prediction_error({
+            "example_id": "ex-5",
+            "company_name": "Partner Moderate Bio",
+            "ticker": "PMB",
+            "target": "financing_before_catalyst",
+            "y_true": 1,
+            "y_prob": 0.45,
+            "financing_type": "partnership",
+        })
+
+        assert result.diagnosed_failure_mode == "partnership_underpredicted"
+
+    def test_identifies_moderate_program_discontinuation_false_negative(self):
+        result = diagnose_prediction_error({
+            "example_id": "ex-6",
+            "company_name": "Disco Moderate Bio",
+            "ticker": "DMB",
+            "target": "program_discontinued_before_catalyst",
+            "y_true": 1,
+            "y_prob": 0.40,
+        })
+
+        assert result.diagnosed_failure_mode == "scientific_discontinuation_underpredicted"
+
 
 class TestAIFeatureEnrichment:
     def test_feature_enrichment_scores_are_bounded(self):
@@ -199,11 +240,132 @@ class TestClaimExtraction:
         assert financing.normalized_value == "$150 million public offering"
         assert discontinued.normalized_value == "program_discontinuation"
 
+    @pytest.mark.parametrize("phrase", [
+        "The company expects cash to be sufficient to fund operations through Q2 2026.",
+        "Cash will fund operating expenses and capital expenditure requirements through at least the second quarter of 2026.",
+        "The cash runway extends into the first half of 2027.",
+        "The company is expected to fund operations into 2027.",
+    ])
+    def test_extracts_expanded_runway_guidance(self, phrase):
+        result = extract_runway_guidance(phrase)
+
+        assert result.normalized_value is not None
+        assert result.confidence >= 0.6
+
+    @pytest.mark.parametrize("phrase", [
+        "Topline results expected in Q3 2025.",
+        "Data readout anticipated in H1 2026.",
+        "Primary completion expected in 2024.",
+        "The PDUFA date of January 5, 2024 was assigned.",
+    ])
+    def test_extracts_expanded_catalyst_guidance(self, phrase):
+        result = extract_catalyst_guidance(phrase)
+
+        assert result.normalized_value is not None
+        assert result.confidence >= 0.6
+
+    @pytest.mark.parametrize("phrase", [
+        "The financing generated gross proceeds of approximately $150 million.",
+        "The company entered into a private placement with institutional investors.",
+        "The company established an ATM facility.",
+        "The company completed debt financing.",
+        "The company received an upfront payment under collaboration agreement.",
+    ])
+    def test_extracts_expanded_financing_events(self, phrase):
+        result = extract_financing_event(phrase)
+
+        assert result.normalized_value is not None
+        assert result.confidence >= 0.6
+
 
 class TestAIBacktestIntegration:
     def test_diagnose_errors_adds_csv_columns_and_report_section(self, tmp_path):
-        dataset = load_historical_examples(DATASET_PATH)
-        result = run_backtest(dataset, target_name="financing_before_catalyst", diagnose_errors=True)
+        result = BacktestResult(
+            dataset_id="tiny_ai_test",
+            synthetic=True,
+            n_examples=2,
+            generated_at=datetime.now(timezone.utc),
+            target_name="financing_before_catalyst",
+            metric_summary=BacktestMetricSummary(
+                n_examples=2,
+                brier_score=0.25,
+                log_loss=0.7,
+                roc_auc=None,
+                expected_calibration_error=0.1,
+                calibration_buckets=[
+                    CalibrationBucket(bucket_start=0.0, bucket_end=0.5, n_examples=1, mean_predicted_probability=0.25, observed_event_rate=1.0),
+                    CalibrationBucket(bucket_start=0.5, bucket_end=1.0, n_examples=1, mean_predicted_probability=0.75, observed_event_rate=0.0),
+                ],
+                confusion_matrix={"tp": 0, "fp": 1, "tn": 0, "fn": 1},
+                event_rate=0.5,
+                mean_predicted_probability=0.5,
+                overprediction_gap=0.0,
+                underprediction_gap=0.0,
+                calibration_direction="approximately_calibrated",
+            ),
+            per_example_results=[
+                PerExampleBacktestResult(
+                    example_id="ex-1",
+                    company_name="Partner Bio",
+                    ticker="PRTN",
+                    as_of_date="2024-01-01",
+                    predicted_cashout_risk=0.1,
+                    predicted_financing_before_catalyst=0.25,
+                    predicted_distressed_or_cashout_before_catalyst=0.1,
+                    predicted_clean_or_nondilutive_financing_before_catalyst=0.2,
+                    predicted_program_discontinuation=0.1,
+                    predicted_reaches_catalyst_before_financing_pressure=0.7,
+                    predicted_reaches_catalyst_before_cashout=0.8,
+                    posterior_mean_pos=0.45,
+                    actual_financing_before_catalyst=True,
+                    actual_distressed_financing_or_cashout=False,
+                    actual_reached_catalyst_before_financing_pressure=False,
+                    actual_program_discontinued_before_catalyst=False,
+                    probability_mapping_note="manual test row",
+                    error_type="false_negative",
+                    diagnosed_failure_mode="partnership_underpredicted",
+                    likely_missing_features=["partnerability_score"],
+                    suggested_model_patch="Add partnerability features.",
+                    ai_diagnosis_confidence=0.75,
+                    ai_method_status="heuristic_ai_assisted",
+                    partnerability_score=0.8,
+                    proactive_financing_likelihood=0.6,
+                    scientific_discontinuation_risk_score=0.2,
+                    safety_sensitive_modality_score=0.7,
+                ),
+                PerExampleBacktestResult(
+                    example_id="ex-2",
+                    company_name="Clean Bio",
+                    ticker="CLN",
+                    as_of_date="2024-01-01",
+                    predicted_cashout_risk=0.2,
+                    predicted_financing_before_catalyst=0.75,
+                    predicted_distressed_or_cashout_before_catalyst=0.2,
+                    predicted_clean_or_nondilutive_financing_before_catalyst=0.7,
+                    predicted_program_discontinuation=0.0,
+                    predicted_reaches_catalyst_before_financing_pressure=0.2,
+                    predicted_reaches_catalyst_before_cashout=0.4,
+                    posterior_mean_pos=0.35,
+                    actual_financing_before_catalyst=False,
+                    actual_distressed_financing_or_cashout=False,
+                    actual_reached_catalyst_before_financing_pressure=True,
+                    actual_program_discontinued_before_catalyst=False,
+                    probability_mapping_note="manual test row",
+                    error_type="false_positive",
+                    diagnosed_failure_mode="cash_distress_overpredicted",
+                    likely_missing_features=["proactive_financing_likelihood"],
+                    suggested_model_patch="Check proactive financing.",
+                    ai_diagnosis_confidence=0.55,
+                    ai_method_status="heuristic_ai_assisted",
+                    partnerability_score=0.3,
+                    proactive_financing_likelihood=0.5,
+                    scientific_discontinuation_risk_score=0.1,
+                    safety_sensitive_modality_score=0.2,
+                ),
+            ],
+            warnings=["Synthetic test data only."],
+            calibration_status="synthetic_test_only",
+        )
         csv_path = tmp_path / "errors.csv"
 
         write_prediction_error_table(result, csv_path, diagnose_errors=True)
@@ -212,6 +374,8 @@ class TestAIBacktestIntegration:
 
         assert "diagnosed_failure_mode" in rows[0]
         assert "ai_method_status" in rows[0]
+        assert "partnerability_score" in rows[0]
+        assert rows[0]["partnerability_score"] == "0.800000"
         assert "AI-Assisted Error Diagnosis" in report
         assert "heuristic AI-assisted diagnosis" in report
 

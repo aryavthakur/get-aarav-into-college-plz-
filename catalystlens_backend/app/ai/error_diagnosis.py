@@ -44,30 +44,32 @@ def diagnose_prediction_error(row: dict[str, Any]) -> AIBacktestErrorDiagnosis:
     y_prob = _as_float(row.get("y_prob"))
     absolute_error = _as_float(row.get("absolute_error", abs(y_prob - y_true)))
     financing_type = str(row.get("financing_type") or "").lower()
+    missed_positive = y_true == 1 and (y_prob < 0.5 or absolute_error >= 0.35)
+    severe_miss = y_true == 1 and y_prob < 0.35
 
     mode: AIBacktestFailureMode = "other"
     missing_features: list[str] = ["source_grounding_quality"]
     patch = "Review source data and add target-specific calibrated features before changing model probabilities."
     confidence = _confidence(row, 0.35)
 
-    if target == "financing_before_catalyst" and y_true == 1 and y_prob < 0.35:
+    if target == "financing_before_catalyst" and missed_positive:
         if financing_type == "partnership":
             mode = "partnership_underpredicted"
             missing_features = ["partnerability_score", "strategic_collaboration_likelihood"]
             patch = "Add partnerability and strategic-collaboration features to financing-state calibration."
-            confidence = _confidence(row, 0.65)
+            confidence = _confidence(row, 0.65 if severe_miss else 0.5)
         elif financing_type == "clean_refinancing":
             mode = "proactive_financing_underpredicted"
             missing_features = ["proactive_financing_likelihood", "market_window_strength", "high_value_catalyst"]
             patch = "Separate proactive clean financing from distress-driven financing pressure."
-            confidence = _confidence(row, 0.65)
+            confidence = _confidence(row, 0.65 if severe_miss else 0.5)
         elif financing_type == "distressed_refinancing":
             mode = "distressed_financing_underpredicted"
             missing_features = ["financing_pressure_score", "market_window_strength", "going_concern_risk"]
             patch = "Increase distressed-financing feature coverage and validate labels against source filings."
-            confidence = _confidence(row, 0.6)
+            confidence = _confidence(row, 0.6 if severe_miss else 0.48)
 
-    elif target == "program_discontinued_before_catalyst" and y_true == 1 and y_prob < 0.35:
+    elif target == "program_discontinued_before_catalyst" and missed_positive:
         mode = "scientific_discontinuation_underpredicted"
         missing_features = [
             "safety_sensitive_modality_score",
@@ -76,7 +78,7 @@ def diagnose_prediction_error(row: dict[str, Any]) -> AIBacktestErrorDiagnosis:
             "modality_safety_prior",
         ]
         patch = "Add biology/safety discontinuation features separate from financial runway features."
-        confidence = _confidence(row, 0.6)
+        confidence = _confidence(row, 0.6 if severe_miss else 0.48)
 
     elif target == "reached_catalyst_before_financing_pressure" and absolute_error > 0.5:
         mode = "reached_catalyst_label_ambiguous"
