@@ -53,6 +53,10 @@ def write_prediction_error_table(result, path: Path, diagnose_errors: bool = Fal
             "suggested_model_patch",
             "ai_diagnosis_confidence",
             "ai_method_status",
+            "partnerability_score",
+            "proactive_financing_likelihood",
+            "scientific_discontinuation_risk_score",
+            "safety_sensitive_modality_score",
         ])
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -78,6 +82,10 @@ def write_prediction_error_table(result, path: Path, diagnose_errors: bool = Fal
                     "suggested_model_patch": row.suggested_model_patch or "",
                     "ai_diagnosis_confidence": "" if row.ai_diagnosis_confidence is None else f"{row.ai_diagnosis_confidence:.6f}",
                     "ai_method_status": row.ai_method_status or "",
+                    "partnerability_score": "" if row.partnerability_score is None else f"{row.partnerability_score:.6f}",
+                    "proactive_financing_likelihood": "" if row.proactive_financing_likelihood is None else f"{row.proactive_financing_likelihood:.6f}",
+                    "scientific_discontinuation_risk_score": "" if row.scientific_discontinuation_risk_score is None else f"{row.scientific_discontinuation_risk_score:.6f}",
+                    "safety_sensitive_modality_score": "" if row.safety_sensitive_modality_score is None else f"{row.safety_sensitive_modality_score:.6f}",
                 })
             writer.writerow(out)
 

@@ -63,6 +63,10 @@ class PerExampleBacktestResult(BaseModel):
     suggested_model_patch: Optional[str] = None
     ai_diagnosis_confidence: Optional[float] = None
     ai_method_status: Optional[str] = None
+    partnerability_score: Optional[float] = None
+    proactive_financing_likelihood: Optional[float] = None
+    scientific_discontinuation_risk_score: Optional[float] = None
+    safety_sensitive_modality_score: Optional[float] = None
 
 
 class BacktestResult(BaseModel):

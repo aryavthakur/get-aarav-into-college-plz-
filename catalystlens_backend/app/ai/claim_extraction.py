@@ -30,6 +30,10 @@ def extract_runway_guidance(text: str) -> AIExtractionResult:
     patterns = [
         r"(?:funded|cash runway|runway)\s+(?:into|through|until)\s+((?:q[1-4]\s+)?20\d{2})",
         r"(?:funded|cash runway|runway)\s+(?:into|through|until)\s+((?:first|second|third|fourth)\s+quarter\s+20\d{2})",
+        r"(?:sufficient to )?fund operations\s+(?:into|through|until)\s+((?:q[1-4]\s+)?20\d{2})",
+        r"fund operating expenses and capital expenditure requirements\s+(?:through|until)\s+(?:at least\s+)?(?:the\s+)?((?:first|second|third|fourth)\s+quarter\s+of\s+20\d{2})",
+        r"cash runway extends\s+(?:into|through|until)\s+(?:the\s+)?((?:first|second)\s+half\s+of\s+20\d{2})",
+        r"expected to fund operations\s+(?:into|through|until)\s+(20\d{2})",
     ]
     for pattern in patterns:
         match = re.search(pattern, lowered, flags=re.IGNORECASE)
@@ -42,21 +46,38 @@ def extract_runway_guidance(text: str) -> AIExtractionResult:
 
 def extract_catalyst_guidance(text: str) -> AIExtractionResult:
     lowered = text.lower()
-    pattern = r"((?:topline|interim|data|readout)[^.]{0,60}?(?:expected|anticipated|planned)[^.]{0,60}?(?:h[12]|q[1-4]|20\d{2})[^.]*)"
-    match = re.search(pattern, lowered, flags=re.IGNORECASE)
-    if match:
-        span = match.group(1)
-        normalized_match = re.search(r"(h[12]\s+20\d{2}|q[1-4]\s+20\d{2}|20\d{2})", span, flags=re.IGNORECASE)
-        return _result(text, "catalyst_guidance", span, normalized_match.group(1).upper() if normalized_match else span, 0.7)
+    patterns = [
+        r"((?:topline|interim|data|readout|topline results|data readout)[^.]{0,60}?(?:expected|anticipated|planned)[^.]{0,60}?(?:h[12]|q[1-4]|20\d{2})[^.]*)",
+        r"((?:primary completion)[^.]{0,60}?(?:expected|anticipated|planned)[^.]{0,60}?(?:h[12]|q[1-4]|20\d{2})[^.]*)",
+        r"((?:pdufa date)[^.]{0,80}?(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},\s+20\d{2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lowered, flags=re.IGNORECASE)
+        if match:
+            span = match.group(1)
+            normalized_match = re.search(
+                r"(h[12]\s+20\d{2}|q[1-4]\s+20\d{2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},\s+20\d{2}|20\d{2})",
+                span,
+                flags=re.IGNORECASE,
+            )
+            return _result(text, "catalyst_guidance", span, normalized_match.group(1).upper() if normalized_match else span, 0.7)
     return _result(text, "catalyst_guidance", None, None, 0.1)
 
 
 def extract_financing_event(text: str) -> AIExtractionResult:
-    pattern = r"(?:announced|closed|completed)?\s*(\$[0-9,.]+\s*(?:million|billion)[^.]{0,50}?(?:public offering|private placement|pipe|registered direct|debt|royalty|partnership))"
-    match = re.search(pattern, text, flags=re.IGNORECASE)
-    if match:
-        value = " ".join(match.group(1).split())
-        return _result(text, "financing_event", value, value, 0.75)
+    patterns = [
+        r"(?:announced|closed|completed)?\s*(\$[0-9,.]+\s*(?:million|billion)[^.]{0,50}?(?:public offering|private placement|pipe|registered direct|debt|royalty|partnership))",
+        r"(gross proceeds of approximately\s+\$[0-9,.]+\s*(?:million|billion))",
+        r"(entered into a private placement[^.]*)",
+        r"((?:established|entered into|launched)?\s*(?:an?\s+)?atm facility[^.]*)",
+        r"((?:completed|closed|announced)?\s*debt financing[^.]*)",
+        r"(upfront payment under collaboration agreement[^.]*)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = " ".join(match.group(1).split())
+            return _result(text, "financing_event", value, value, 0.75)
     return _result(text, "financing_event", None, None, 0.1)
 
 
