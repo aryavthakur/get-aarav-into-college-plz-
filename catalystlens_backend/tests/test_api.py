@@ -10,7 +10,11 @@ from fastapi.testclient import TestClient
 import app.api.routes as routes
 from app.main import app
 
-client = TestClient(app)
+
+@pytest.fixture
+def client():
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 def _load_example_payload() -> dict:
@@ -60,21 +64,21 @@ def _minimal_clinical_payload() -> dict:
 
 
 class TestRootEndpoint:
-    def test_returns_200(self):
+    def test_returns_200(self, client):
         response = client.get("/")
         assert response.status_code == 200
 
-    def test_returns_service_name(self):
+    def test_returns_service_name(self, client):
         response = client.get("/")
         data = response.json()
         assert data["service"] == "CatalystLens"
         assert data["status"] == "operational"
 
-    def test_response_has_version(self):
+    def test_response_has_version(self, client):
         response = client.get("/")
         assert "version" in response.json()
 
-    def test_response_exposes_research_mode_status(self):
+    def test_response_exposes_research_mode_status(self, client):
         response = client.get("/")
         data = response.json()
         assert data["model_mode"] == "research_mode"
@@ -82,12 +86,12 @@ class TestRootEndpoint:
 
 
 class TestAuditEndpoint:
-    def test_audit_returns_200_with_example_payload(self):
+    def test_audit_returns_200_with_example_payload(self, client):
         payload = _load_example_payload()
         response = client.post("/audit", json=payload)
         assert response.status_code == 200, f"Audit failed: {response.text[:500]}"
 
-    def test_audit_response_has_expected_top_level_keys(self):
+    def test_audit_response_has_expected_top_level_keys(self, client):
         payload = _load_example_payload()
         response = client.post("/audit", json=payload)
         data = response.json()
@@ -102,7 +106,7 @@ class TestAuditEndpoint:
         for key in expected_keys:
             assert key in data, f"Missing key: {key}"
 
-    def test_audit_model_version_fields(self):
+    def test_audit_model_version_fields(self, client):
         payload = _load_example_payload()
         response = client.post("/audit", json=payload)
         mv = response.json()["model_version"]
@@ -111,7 +115,7 @@ class TestAuditEndpoint:
         assert isinstance(mv["n_simulations"], int)
         assert isinstance(mv["config_hash"], str) and len(mv["config_hash"]) > 0
 
-    def test_audit_data_quality_fields(self):
+    def test_audit_data_quality_fields(self, client):
         payload = _load_example_payload()
         response = client.post("/audit", json=payload)
         dq = response.json()["data_quality"]
@@ -122,30 +126,30 @@ class TestAuditEndpoint:
         assert dq["data_quality_score"] in ("high", "moderate", "low")
         assert isinstance(dq["primary_limitations"], list)
 
-    def test_audit_company_name_matches_input(self):
+    def test_audit_company_name_matches_input(self, client):
         payload = _load_example_payload()
         response = client.post("/audit", json=payload)
         data = response.json()
         assert data["company_name"] == "NovaCure Therapeutics"
 
-    def test_audit_probability_in_range(self):
+    def test_audit_probability_in_range(self, client):
         payload = _load_example_payload()
         response = client.post("/audit", json=payload)
         data = response.json()
         p = data["capital_to_catalyst"]["probability_cashout_before_catalyst"]
         assert 0.0 <= p <= 1.0
 
-    def test_audit_markdown_report_non_empty(self):
+    def test_audit_markdown_report_non_empty(self, client):
         payload = _load_example_payload()
         response = client.post("/audit", json=payload)
         data = response.json()
         assert len(data["markdown_report"]) > 500
 
-    def test_audit_invalid_payload_returns_422(self):
+    def test_audit_invalid_payload_returns_422(self, client):
         response = client.post("/audit", json={"invalid": "payload"})
         assert response.status_code == 422
 
-    def test_audit_domain_value_error_returns_400(self, monkeypatch):
+    def test_audit_domain_value_error_returns_400(self, client, monkeypatch):
         def raise_value_error(request):
             raise ValueError("domain rule failed")
 
@@ -155,7 +159,7 @@ class TestAuditEndpoint:
         assert response.status_code == 400
         assert response.json()["detail"] == "domain rule failed"
 
-    def test_audit_unexpected_error_returns_generic_500(self, monkeypatch):
+    def test_audit_unexpected_error_returns_generic_500(self, client, monkeypatch):
         def raise_runtime_error(request):
             raise RuntimeError("secret internals")
 
@@ -168,22 +172,22 @@ class TestAuditEndpoint:
 
 
 class TestSolvencyEndpoint:
-    def test_solvency_returns_200(self):
+    def test_solvency_returns_200(self, client):
         response = client.post("/solvency", json=_minimal_financial_payload())
         assert response.status_code == 200
 
-    def test_solvency_returns_monthly_burn(self):
+    def test_solvency_returns_monthly_burn(self, client):
         response = client.post("/solvency", json=_minimal_financial_payload())
         data = response.json()
         assert "monthly_burn" in data
         assert data["monthly_burn"] == pytest.approx(5_000_000, rel=1e-3)
 
-    def test_solvency_survival_curve_non_empty(self):
+    def test_solvency_survival_curve_non_empty(self, client):
         response = client.post("/solvency", json=_minimal_financial_payload())
         data = response.json()
         assert len(data["survival_curve"]) > 0
 
-    def test_solvency_probabilities_in_range(self):
+    def test_solvency_probabilities_in_range(self, client):
         response = client.post("/solvency", json=_minimal_financial_payload())
         data = response.json()
         for key in ["p_survival_6m", "p_survival_12m", "p_survival_18m", "p_survival_24m"]:
@@ -191,7 +195,7 @@ class TestSolvencyEndpoint:
 
 
 class TestSuccessProbabilityEndpoint:
-    def test_returns_200(self):
+    def test_returns_200(self, client):
         payload = {
             "trial_phase": "phase_2",
             "positive_signals": ["validated_biomarker"],
@@ -200,7 +204,7 @@ class TestSuccessProbabilityEndpoint:
         response = client.post("/success-probability", json=payload)
         assert response.status_code == 200
 
-    def test_returns_posterior_mean(self):
+    def test_returns_posterior_mean(self, client):
         payload = {
             "trial_phase": "phase_2",
             "positive_signals": [],
@@ -213,11 +217,11 @@ class TestSuccessProbabilityEndpoint:
 
 
 class TestMilestoneTimingEndpoint:
-    def test_returns_200(self):
+    def test_returns_200(self, client):
         response = client.post("/milestone-timing", json=_minimal_clinical_payload())
         assert response.status_code == 200
 
-    def test_returns_gamma_parameters(self):
+    def test_returns_gamma_parameters(self, client):
         response = client.post("/milestone-timing", json=_minimal_clinical_payload())
         data = response.json()
         assert "gamma_alpha" in data
@@ -226,7 +230,7 @@ class TestMilestoneTimingEndpoint:
 
 
 class TestBurnRegimeEndpoint:
-    def test_returns_200(self):
+    def test_returns_200(self, client):
         payload = {
             **_minimal_financial_payload(),
             "quarterly_burn_history": [
@@ -239,7 +243,7 @@ class TestBurnRegimeEndpoint:
         response = client.post("/burn-regime", json=payload)
         assert response.status_code == 200
 
-    def test_returns_regime_classification(self):
+    def test_returns_regime_classification(self, client):
         payload = {
             **_minimal_financial_payload(),
             "quarterly_burn_history": [
@@ -258,7 +262,7 @@ class TestBurnRegimeEndpoint:
 
 
 class TestDisclosureConsistencyEndpoint:
-    def test_returns_200(self):
+    def test_returns_200(self, client):
         payload = {
             "company_narrative_distribution": {
                 "runway_strength": 0.8,
@@ -274,7 +278,7 @@ class TestDisclosureConsistencyEndpoint:
         response = client.post("/disclosure-consistency", json=payload)
         assert response.status_code == 200
 
-    def test_returns_jsd_in_range(self):
+    def test_returns_jsd_in_range(self, client):
         payload = {
             "company_narrative_distribution": {
                 "runway_strength": 0.8,
@@ -289,7 +293,7 @@ class TestDisclosureConsistencyEndpoint:
         data = response.json()
         assert 0.0 <= data["jsd_score"] <= 1.0
 
-    def test_identical_distributions_produce_near_zero_jsd(self):
+    def test_identical_distributions_produce_near_zero_jsd(self, client):
         dist = {
             "runway_strength": 0.5,
             "clinical_timeline_confidence": 0.6,

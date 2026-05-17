@@ -15,7 +15,11 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-client = TestClient(app)
+
+@pytest.fixture
+def client():
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 # ---------------------------------------------------------------------------
@@ -328,20 +332,20 @@ class TestCallAIFallback:
 # ---------------------------------------------------------------------------
 
 class TestLambdaHealthRoute:
-    def test_lambda_health_returns_200(self, monkeypatch):
+    def test_lambda_health_returns_200(self, client, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "fake-groq")
         response = client.get("/lambda-health")
         assert response.status_code == 200
 
-    def test_lambda_health_returns_provider(self, monkeypatch):
+    def test_lambda_health_returns_provider(self, client, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "fake-groq")
         data = client.get("/lambda-health").json()
         assert data["status"] == "ok"
         assert data["provider"] == "groq"
 
-    def test_lambda_health_unavailable_when_no_keys(self, monkeypatch):
+    def test_lambda_health_unavailable_when_no_keys(self, client, monkeypatch):
         import app.ai.llm_client as lc
         monkeypatch.setattr(lc, "GROQ_API_KEY", "")
         monkeypatch.setattr(lc, "OPENROUTER_API_KEY", "")
@@ -360,7 +364,7 @@ class TestLambdaHealthRoute:
 # ---------------------------------------------------------------------------
 
 class TestLambdaAnalyzeRoute:
-    def test_returns_method_status(self, monkeypatch):
+    def test_returns_method_status(self, client, monkeypatch):
         import app.ai.llm_analysis as la
 
         async def _mock_call_ai(prompt, timeout=60.0):
@@ -379,7 +383,7 @@ class TestLambdaAnalyzeRoute:
         data = response.json()
         assert data["method_status"] == "llm_assisted_source_review"
 
-    def test_returns_investment_advice_false(self, monkeypatch):
+    def test_returns_investment_advice_false(self, client, monkeypatch):
         import app.ai.llm_analysis as la
 
         async def _mock_call_ai(prompt, timeout=60.0):
@@ -392,7 +396,7 @@ class TestLambdaAnalyzeRoute:
         ).json()
         assert data["investment_advice"] is False
 
-    def test_returns_probability_override_false(self, monkeypatch):
+    def test_returns_probability_override_false(self, client, monkeypatch):
         import app.ai.llm_analysis as la
 
         async def _mock_call_ai(prompt, timeout=60.0):
@@ -405,7 +409,7 @@ class TestLambdaAnalyzeRoute:
         ).json()
         assert data["probability_override"] is False
 
-    def test_analysis_field_contains_mock_output(self, monkeypatch):
+    def test_analysis_field_contains_mock_output(self, client, monkeypatch):
         import app.ai.llm_analysis as la
 
         async def _mock_call_ai(prompt, timeout=60.0):
@@ -441,7 +445,7 @@ class TestExtractClaimsRoute:
             "source_url": None,
         })
 
-    def test_extract_claims_parses_valid_json(self, monkeypatch):
+    def test_extract_claims_parses_valid_json(self, client, monkeypatch):
         import app.ai.llm_claim_extraction as lce
 
         async def _mock_call_ai(prompt, timeout=60.0):
@@ -458,7 +462,7 @@ class TestExtractClaimsRoute:
         assert data["runway_claim"] == "funded into Q3 2026"
         assert data["confidence"] == pytest.approx(0.85)
 
-    def test_extract_claims_handles_invalid_json_safely(self, monkeypatch):
+    def test_extract_claims_handles_invalid_json_safely(self, client, monkeypatch):
         import app.ai.llm_claim_extraction as lce
 
         async def _mock_call_ai(prompt, timeout=60.0):
@@ -476,7 +480,7 @@ class TestExtractClaimsRoute:
         assert data["method_status"] == "llm_assisted_claim_extraction_parse_failed"
         assert data["source_url"] == "https://sec.gov/test.htm"
 
-    def test_extract_claims_handles_malformed_json_safely(self, monkeypatch):
+    def test_extract_claims_handles_malformed_json_safely(self, client, monkeypatch):
         import app.ai.llm_claim_extraction as lce
 
         async def _mock_call_ai(prompt, timeout=60.0):
@@ -490,7 +494,7 @@ class TestExtractClaimsRoute:
         assert data["parse_error"] is True
         assert data["requires_human_review"] is True
 
-    def test_source_url_injected_when_not_in_response(self, monkeypatch):
+    def test_source_url_injected_when_not_in_response(self, client, monkeypatch):
         import app.ai.llm_claim_extraction as lce
         payload = json.dumps({
             "runway_claim": None, "normalized_runway_date": None,
@@ -519,7 +523,7 @@ class TestExtractClaimsRoute:
 # ---------------------------------------------------------------------------
 
 class TestLowConfidenceExtraction:
-    def test_low_confidence_forces_human_review(self, monkeypatch):
+    def test_low_confidence_forces_human_review(self, client, monkeypatch):
         import app.ai.llm_claim_extraction as lce
 
         low_conf = json.dumps({
@@ -546,7 +550,7 @@ class TestLowConfidenceExtraction:
         assert data["confidence"] == pytest.approx(0.50)
         assert data["requires_human_review"] is True
 
-    def test_confidence_clamped_above_one(self, monkeypatch):
+    def test_confidence_clamped_above_one(self, client, monkeypatch):
         import app.ai.llm_claim_extraction as lce
 
         payload = json.dumps({
@@ -570,7 +574,7 @@ class TestLowConfidenceExtraction:
         ).json()
         assert data["confidence"] <= 1.0
 
-    def test_confidence_clamped_below_zero(self, monkeypatch):
+    def test_confidence_clamped_below_zero(self, client, monkeypatch):
         import app.ai.llm_claim_extraction as lce
 
         payload = json.dumps({
@@ -601,7 +605,7 @@ class TestLowConfidenceExtraction:
 # ---------------------------------------------------------------------------
 
 class TestAuditUnchangedWithoutLLM:
-    def test_audit_output_unchanged_when_llm_disabled(self):
+    def test_audit_output_unchanged_when_llm_disabled(self, client):
         """use_llm_source_review=False must not affect audit output."""
         import json as _json
         import os
@@ -620,7 +624,7 @@ class TestAuditUnchangedWithoutLLM:
         # llm_source_review should be absent or null when disabled
         assert data.get("llm_source_review") is None
 
-    def test_audit_llm_field_absent_by_default(self):
+    def test_audit_llm_field_absent_by_default(self, client):
         import json as _json
         import os
 
