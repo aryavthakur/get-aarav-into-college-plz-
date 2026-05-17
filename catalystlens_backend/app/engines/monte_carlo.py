@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from app.ai.feature_enrichment import enrich_company_features
+from app.ai.schemas import AIFeatureEnrichment
 from app.core.config import CatalystLensConfig, get_default_config
 from app.engines.bayesian_success import (
     build_success_prior_by_phase,
@@ -1368,7 +1370,26 @@ def run_full_audit(
         method_status=ss_raw.method_status,
     )
 
-    # ---- Step 20: Report ----
+    # ---- Step 20: Optional AI-assisted feature enrichment ----
+    ai_feature_enrichment: AIFeatureEnrichment | None = None
+    if sim_cfg.use_ai_feature_enrichment:
+        ai_feature_enrichment = enrich_company_features({
+            "example_id": financial.ticker,
+            "ticker": financial.ticker,
+            "disease_area": pos_input.disease_area or clinical.indication,
+            "indication": clinical.indication,
+            "modality": pos_input.modality,
+            "endpoint_family": pos_input.endpoint_family,
+            "trial_phase": clinical.trial_phase,
+            "trial_status": clinical.trial_status,
+            "market_cap": financial.market_cap,
+            "simple_runway_months": solvency_result.simple_runway_months,
+            "posterior_pos": pos_result.posterior_mean,
+            "going_concern_flag": financial.going_concern_flag,
+            "source_grounding_quality": 0.35,
+        })
+
+    # ---- Step 21: Report ----
     audit_response = AuditResponse(
         company_name=financial.company_name,
         ticker=financial.ticker,
@@ -1395,6 +1416,7 @@ def run_full_audit(
         bma=bma_result,
         dependence=dependence_result,
         state_space=state_space_result,
+        ai_feature_enrichment=ai_feature_enrichment,
         warnings=[
             "This is NOT investment advice.",
             "All model outputs are probabilistic ESTIMATES, not predictions.",

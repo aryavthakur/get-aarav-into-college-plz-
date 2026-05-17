@@ -57,6 +57,12 @@ class PerExampleBacktestResult(BaseModel):
     actual_program_discontinued_before_catalyst: bool
     actual_clinical_success: Optional[bool] = None
     probability_mapping_note: str
+    error_type: Optional[str] = None
+    diagnosed_failure_mode: Optional[str] = None
+    likely_missing_features: list[str] = Field(default_factory=list)
+    suggested_model_patch: Optional[str] = None
+    ai_diagnosis_confidence: Optional[float] = None
+    ai_method_status: Optional[str] = None
 
 
 class BacktestResult(BaseModel):

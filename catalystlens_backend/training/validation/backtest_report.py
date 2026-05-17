@@ -2,12 +2,56 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from training.validation.schemas import BacktestResult
 from training.validation.target_mapping import TARGET_DEFINITIONS
 
 
 def _fmt_pct(value: float | None) -> str:
     return "NA" if value is None else f"{value:.1%}"
+
+
+def _ai_error_diagnosis_section(result: BacktestResult) -> str:
+    diagnosed = [row for row in result.per_example_results if row.ai_method_status]
+    if not diagnosed:
+        return ""
+    mode_counts = Counter(row.diagnosed_failure_mode or "other" for row in diagnosed)
+    feature_counts = Counter(
+        feature
+        for row in diagnosed
+        for feature in row.likely_missing_features
+    )
+    patch_counts = Counter(
+        row.suggested_model_patch
+        for row in diagnosed
+        if row.suggested_model_patch
+    )
+    mode_rows = "\n".join(
+        f"| {mode} | {count} |" for mode, count in mode_counts.most_common()
+    )
+    feature_rows = "\n".join(
+        f"| {feature} | {count} |" for feature, count in feature_counts.most_common(8)
+    ) or "| None | 0 |"
+    patch_rows = "\n".join(
+        f"- {patch} ({count})" for patch, count in patch_counts.most_common(5)
+    ) or "- None"
+    return f"""## AI-Assisted Error Diagnosis
+
+These diagnoses are heuristic AI-assisted diagnosis, not validated causal explanations. Source verification and human review are required before using them for model changes.
+
+| Diagnosed failure mode | Count |
+|---|---:|
+{mode_rows}
+
+| Suggested missing feature | Count |
+|---|---:|
+{feature_rows}
+
+Suggested model improvements:
+
+{patch_rows}
+"""
 
 
 def generate_backtest_report(result: BacktestResult) -> str:
@@ -94,6 +138,8 @@ Confusion matrix at threshold 0.50:
 - Sparse buckets can make calibration unstable.
 - Financing labels may combine clean, distressed, and nondilutive events unless the target is narrowed.
 - Synthetic data can verify plumbing but cannot prove predictive performance.
+
+{_ai_error_diagnosis_section(result)}
 
 ## 7. Limitations
 

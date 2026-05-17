@@ -8,6 +8,7 @@ from typing import Iterable
 
 import numpy as np
 
+from app.ai.error_diagnosis import diagnose_prediction_error
 from app.engines.monte_carlo import run_full_audit
 from app.models.schemas import (
     AuditRequest,
@@ -194,10 +195,25 @@ def _target_values(results: Iterable[PerExampleBacktestResult], target_name: str
     return y_true, y_prob
 
 
+def _target_for_row(row: PerExampleBacktestResult, target_name: str) -> tuple[int, float]:
+    if target_name == "financing_before_catalyst":
+        return int(row.actual_financing_before_catalyst), row.predicted_financing_before_catalyst
+    if target_name == "distressed_financing_or_cashout":
+        return int(row.actual_distressed_financing_or_cashout), row.predicted_distressed_or_cashout_before_catalyst
+    if target_name == "program_discontinued_before_catalyst":
+        return int(row.actual_program_discontinued_before_catalyst), row.predicted_program_discontinuation
+    if target_name == "reached_catalyst_before_financing_pressure":
+        return int(row.actual_reached_catalyst_before_financing_pressure), row.predicted_reaches_catalyst_before_financing_pressure
+    if target_name == "clinical_success":
+        return int(bool(row.actual_clinical_success)), row.posterior_mean_pos
+    raise ValueError(f"Unsupported backtest target: {target_name}")
+
+
 def run_backtest(
     dataset: HistoricalDataset,
     simulation_config: SimulationConfig | None = None,
     target_name: str = "financing_before_catalyst",
+    diagnose_errors: bool = False,
 ) -> BacktestResult:
     """Run the current CatalystLens audit engine on every point-in-time example."""
     sim = simulation_config or SimulationConfig(n_simulations=300, random_seed=42, monthly_horizon=48)
@@ -219,7 +235,7 @@ def run_backtest(
             clinical_success = False
         reached = bool(extract_actual_label(example, "reached_catalyst_before_financing_pressure"))
         mapped = mapped_probabilities(audit)
-        per_example.append(PerExampleBacktestResult(
+        row_result = PerExampleBacktestResult(
             example_id=example.example_id,
             company_name=example.company_name,
             ticker=example.ticker,
@@ -238,7 +254,32 @@ def run_backtest(
             actual_program_discontinued_before_catalyst=example.program_discontinued_before_catalyst,
             actual_clinical_success=clinical_success,
             probability_mapping_note=str(mapped["probability_mapping_note"]),
-        ))
+        )
+        if diagnose_errors:
+            y_true, y_prob = _target_for_row(row_result, target_name)
+            diagnosis = diagnose_prediction_error({
+                "example_id": example.example_id,
+                "company_name": example.company_name,
+                "ticker": example.ticker,
+                "target": target_name,
+                "y_true": y_true,
+                "y_prob": y_prob,
+                "absolute_error": abs(y_prob - y_true),
+                "financing_type": example.financing_type,
+                "trial_status": example.trial_status,
+                "modality": example.modality,
+                "disease_area": example.disease_area,
+                "clinical_outcome": example.clinical_outcome,
+            })
+            row_result = row_result.model_copy(update={
+                "error_type": diagnosis.error_type,
+                "diagnosed_failure_mode": diagnosis.diagnosed_failure_mode,
+                "likely_missing_features": diagnosis.likely_missing_features,
+                "suggested_model_patch": diagnosis.suggested_model_patch,
+                "ai_diagnosis_confidence": diagnosis.confidence,
+                "ai_method_status": diagnosis.method_status,
+            })
+        per_example.append(row_result)
 
     y_true, y_prob = _target_values(per_example, target_name)
     buckets = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
