@@ -30,6 +30,8 @@ def _row_target(row, target: str) -> tuple[int, float]:
         return int(row.actual_reached_catalyst_before_financing_pressure), row.predicted_reaches_catalyst_before_financing_pressure
     if target == "clinical_success":
         return int(bool(row.actual_clinical_success)), row.posterior_mean_pos
+    if target in row.extra_actual_labels:
+        return int(row.extra_actual_labels[target]), float(row.extra_predicted_probabilities.get(target, 0.0))
     raise ValueError(f"Unsupported target: {target}")
 
 
@@ -57,6 +59,14 @@ def write_prediction_error_table(result, path: Path, diagnose_errors: bool = Fal
             "proactive_financing_likelihood",
             "scientific_discontinuation_risk_score",
             "safety_sensitive_modality_score",
+            "false_negative_financing_event",
+            "false_positive_financing_event",
+            "false_negative_program_discontinuation",
+            "false_positive_program_discontinuation",
+            "scientific_failure_not_captured",
+            "partnership_not_captured",
+            "clean_refi_not_captured",
+            "target_definition_ambiguous",
         ])
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -86,6 +96,14 @@ def write_prediction_error_table(result, path: Path, diagnose_errors: bool = Fal
                     "proactive_financing_likelihood": "" if row.proactive_financing_likelihood is None else f"{row.proactive_financing_likelihood:.6f}",
                     "scientific_discontinuation_risk_score": "" if row.scientific_discontinuation_risk_score is None else f"{row.scientific_discontinuation_risk_score:.6f}",
                     "safety_sensitive_modality_score": "" if row.safety_sensitive_modality_score is None else f"{row.safety_sensitive_modality_score:.6f}",
+                    "false_negative_financing_event": row.false_negative_financing_event,
+                    "false_positive_financing_event": row.false_positive_financing_event,
+                    "false_negative_program_discontinuation": row.false_negative_program_discontinuation,
+                    "false_positive_program_discontinuation": row.false_positive_program_discontinuation,
+                    "scientific_failure_not_captured": row.scientific_failure_not_captured,
+                    "partnership_not_captured": row.partnership_not_captured,
+                    "clean_refi_not_captured": row.clean_refi_not_captured,
+                    "target_definition_ambiguous": row.target_definition_ambiguous,
                 })
             writer.writerow(out)
 

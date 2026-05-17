@@ -85,6 +85,65 @@ TARGET_DEFINITIONS: dict[str, TargetDefinition] = {
         approximate=True,
         fallback_logic="Not scored when clinical outcome is not reported.",
     ),
+    "reached_public_readout": TargetDefinition(
+        target_name="reached_public_readout",
+        label_description="Historical label is true when an actual public readout date is available.",
+        probability_description="Uses probability_reaches_catalyst as an approximate public-readout proxy.",
+        positive_label_definition="actual_readout_date exists",
+        probability_source="capital_to_catalyst.probability_reaches_catalyst",
+        approximate=True,
+        fallback_logic="Public readout and internal catalyst timing are not perfectly separated in historical labels.",
+    ),
+    "reached_without_any_financing_event": TargetDefinition(
+        target_name="reached_without_any_financing_event",
+        label_description="Historical label is true when readout occurred without any recorded financing event before catalyst.",
+        probability_description="Approximates with probability_reaches_catalyst minus p_any_financing_event_before_catalyst.",
+        positive_label_definition="actual_readout_date exists and financing_before_catalyst == false",
+        probability_source="max(0, probability_reaches_catalyst - p_any_financing_event_before_catalyst)",
+        approximate=True,
+        fallback_logic="Financing-event label quality depends on source coverage and may miss nondilutive transactions.",
+    ),
+    "reached_without_dilutive_financing": TargetDefinition(
+        target_name="reached_without_dilutive_financing",
+        label_description="Historical label is true when readout occurred without clean or distressed equity refinancing before catalyst.",
+        probability_description="Approximates with probability_reaches_catalyst minus p_dilutive_financing_before_catalyst.",
+        positive_label_definition="actual_readout_date exists and financing_type not in {clean_refinancing, distressed_refinancing}",
+        probability_source="max(0, probability_reaches_catalyst - p_dilutive_financing_before_catalyst)",
+        approximate=True,
+        fallback_logic="Does not treat partnerships/debt/royalty as dilutive unless labels explicitly classify them that way.",
+    ),
+    "reached_without_distress": TargetDefinition(
+        target_name="reached_without_distress",
+        label_description="Historical label is true when readout occurred without distress, cash distress, or discontinuation.",
+        probability_description="Approximates with probability_reaches_catalyst minus p_financing_pressure_before_catalyst.",
+        positive_label_definition=(
+            "actual_readout_date exists and financing_type != distressed_refinancing and "
+            "program_discontinued_before_catalyst == false and cash_distress_or_going_concern_before_catalyst == false"
+        ),
+        probability_source="max(0, probability_reaches_catalyst - p_financing_pressure_before_catalyst)",
+        approximate=True,
+        fallback_logic="Distress labels are approximate unless financing terms and going-concern language are source verified.",
+    ),
+    "failed_before_readout_due_to_science": TargetDefinition(
+        target_name="failed_before_readout_due_to_science",
+        label_description="Historical label is true when program discontinuation occurred before readout.",
+        probability_description="Uses p_program_discontinuation_before_catalyst as a science/program failure proxy.",
+        positive_label_definition="program_discontinued_before_catalyst == true",
+        probability_source="valuation.p_program_discontinuation_before_catalyst",
+        approximate=True,
+        fallback_logic="Current historical schema does not fully separate safety, biology, futility, and portfolio-priority discontinuations.",
+    ),
+    "failed_before_readout_due_to_finance": TargetDefinition(
+        target_name="failed_before_readout_due_to_finance",
+        label_description="Historical label is true when distress financing or cash distress occurred before readout.",
+        probability_description="Uses p_financing_pressure_before_catalyst as a finance-failure proxy.",
+        positive_label_definition=(
+            "financing_type == distressed_refinancing or cash_distress_or_going_concern_before_catalyst == true"
+        ),
+        probability_source="valuation.p_financing_pressure_before_catalyst",
+        approximate=True,
+        fallback_logic="Financing pressure is approximate unless source filings identify distress terms or going-concern language.",
+    ),
 }
 
 
@@ -194,6 +253,27 @@ def probability_for_target(audit, target_name: str) -> tuple[float, str]:
         return float(mapped["predicted_reaches_catalyst_before_financing_pressure"]), str(mapped["probability_mapping_note"])
     if target_name == "clinical_success":
         return _clamp(_get(getattr(audit, "success_probability", None), "posterior_mean", 0.0) or 0.0), "Uses posterior mean PoS."
+    valuation = getattr(audit, "valuation", None)
+    reaches = _get(getattr(audit, "capital_to_catalyst", None), "probability_reaches_catalyst", 0.0) or 0.0
+    if target_name == "reached_public_readout":
+        return _clamp(reaches), "Approximate mapping: probability_reaches_catalyst used as public-readout proxy."
+    if target_name == "reached_without_any_financing_event":
+        p_any = _get(valuation, "p_any_financing_event_before_catalyst", mapped["predicted_financing_before_catalyst"]) or 0.0
+        return _clamp(max(0.0, reaches - p_any)), "Approximate mapping subtracts p_any_financing_event_before_catalyst."
+    if target_name == "reached_without_dilutive_financing":
+        p_dilutive = _get(valuation, "p_dilutive_financing_before_catalyst", 0.0) or 0.0
+        return _clamp(max(0.0, reaches - p_dilutive)), "Approximate mapping subtracts p_dilutive_financing_before_catalyst."
+    if target_name == "reached_without_distress":
+        p_pressure = _get(valuation, "p_financing_pressure_before_catalyst", mapped["predicted_distressed_or_cashout_before_catalyst"]) or 0.0
+        return _clamp(max(0.0, reaches - p_pressure)), "Approximate mapping subtracts p_financing_pressure_before_catalyst."
+    if target_name == "failed_before_readout_due_to_science":
+        return _clamp(_get(valuation, "p_program_discontinuation_before_catalyst", 0.0) or 0.0), (
+            "Approximate mapping uses p_program_discontinuation_before_catalyst."
+        )
+    if target_name == "failed_before_readout_due_to_finance":
+        return _clamp(_get(valuation, "p_financing_pressure_before_catalyst", mapped["predicted_distressed_or_cashout_before_catalyst"]) or 0.0), (
+            "Approximate mapping uses p_financing_pressure_before_catalyst."
+        )
     raise ValueError(f"Unsupported backtest target: {target_name}")
 
 
@@ -220,4 +300,27 @@ def extract_actual_label(example: HistoricalCompanyCatalystExample, target_name:
         if example.clinical_outcome == "negative":
             return False
         return None
+    if target_name == "reached_public_readout":
+        return example.actual_readout_date is not None
+    if target_name == "reached_without_any_financing_event":
+        return example.actual_readout_date is not None and not example.financing_before_catalyst
+    if target_name == "reached_without_dilutive_financing":
+        return (
+            example.actual_readout_date is not None
+            and example.financing_type not in {"clean_refinancing", "distressed_refinancing"}
+        )
+    if target_name == "reached_without_distress":
+        return (
+            example.actual_readout_date is not None
+            and example.financing_type != "distressed_refinancing"
+            and not example.program_discontinued_before_catalyst
+            and not example.cash_distress_or_going_concern_before_catalyst
+        )
+    if target_name == "failed_before_readout_due_to_science":
+        return example.program_discontinued_before_catalyst
+    if target_name == "failed_before_readout_due_to_finance":
+        return (
+            example.financing_type == "distressed_refinancing"
+            or example.cash_distress_or_going_concern_before_catalyst
+        )
     raise ValueError(f"Unsupported backtest target: {target_name}")

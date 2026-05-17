@@ -85,7 +85,9 @@ def extract_program_discontinuation(text: str) -> AIExtractionResult:
     lowered = text.lower()
     patterns = [
         r"(discontinue development of [^.]+)",
-        r"(strategic restructuring[^.]+)",
+        r"(strategic restructuring[^.]*)",
+        r"(paus(?:e|ed) enrollment(?:\s+(?:in|of|for)\s+[^.]+)?)",
+        r"(terminate(?:d)? the study(?:\s+(?:of|for|in)\s+[^.]+)?)",
         r"(terminate(?:d)? development of [^.]+)",
     ]
     for pattern in patterns:

@@ -49,6 +49,7 @@ from app.engines.milestone_timing import (
     sample_scientific_milestone_time,
 )
 from app.engines.report_generator import generate_full_report
+from app.engines.financing_strategy import FinancingStrategyResult, estimate_financing_strategy
 from app.engines.multistate import (
     CAUSE_NAMES,
     CAUSE_TO_VALUATION_STATE,
@@ -72,6 +73,7 @@ from app.engines.dependence import run_dependence_analysis
 from app.engines.state_space import StateSpaceParams, run_state_space_analysis
 from app.engines.model_averaging import compute_bma
 from app.engines.real_options import RealOptionsInput, simulate_real_options_value
+from app.engines.program_discontinuation import ProgramDiscontinuationResult, estimate_program_discontinuation
 from app.engines.risk_attribution import compute_shapley_attribution
 from app.engines.robustness import compute_robustness_bounds
 from app.engines.value_of_information import run_value_of_information_analysis
@@ -911,19 +913,73 @@ def _apply_planned_financing_state_probabilities(
             p_partnership = 1.0
 
     p_any = _clamp_prob(p_clean + p_distressed + p_partnership + p_debt + p_cash_exhaustion)
-    p_pressure = _clamp_prob(p_distressed + p_debt + p_cash_exhaustion + p_discontinued)
+    p_pressure = _clamp_prob(p_distressed + p_cash_exhaustion + p_discontinued)
     p_nondilutive = _clamp_prob(p_partnership)
     p_dilutive = _clamp_prob(p_clean + p_distressed)
 
     return valuation_result.model_copy(update={
-        "p_refinancing_success": round(_clamp_prob(p_clean), 4),
-        "p_distressed_financing": round(_clamp_prob(p_distressed), 4),
         "p_clean_refinancing_before_catalyst": round(_clamp_prob(p_clean), 4),
         "p_distressed_refinancing_before_catalyst": round(_clamp_prob(p_distressed), 4),
         "p_partnership_before_catalyst": round(_clamp_prob(p_partnership), 4),
         "p_debt_or_royalty_before_catalyst": round(_clamp_prob(p_debt), 4),
         "p_cash_exhaustion_before_catalyst": round(_clamp_prob(p_cash_exhaustion), 4),
         "p_program_discontinuation_before_catalyst": round(_clamp_prob(p_discontinued), 4),
+        "p_any_financing_event_before_catalyst": round(p_any, 4),
+        "p_financing_pressure_before_catalyst": round(p_pressure, 4),
+        "p_nondilutive_financing_before_catalyst": round(p_nondilutive, 4),
+        "p_dilutive_financing_before_catalyst": round(p_dilutive, 4),
+    })
+
+
+def _apply_heuristic_event_taxonomy(
+    valuation_result,
+    strategy: FinancingStrategyResult,
+    discontinuation: ProgramDiscontinuationResult,
+):
+    """Populate explicit event-taxonomy fields with heuristic estimates."""
+    p_clean = max(
+        valuation_result.p_clean_refinancing_before_catalyst,
+        strategy.p_proactive_clean_refinancing,
+    )
+    p_distressed = max(
+        valuation_result.p_distressed_refinancing_before_catalyst,
+        strategy.p_distressed_financing,
+    )
+    p_partnership = max(
+        valuation_result.p_partnership_before_catalyst,
+        strategy.p_partnership_or_nondilutive,
+    )
+    p_debt = valuation_result.p_debt_or_royalty_before_catalyst
+    p_cash = max(
+        valuation_result.p_cash_exhaustion_before_catalyst,
+        strategy.p_cash_exhaustion,
+    )
+    p_program = max(
+        valuation_result.p_program_discontinuation_before_catalyst,
+        discontinuation.p_total_program_discontinuation,
+    )
+
+    event_total = p_clean + p_distressed + p_partnership + p_debt + p_cash
+    if event_total > 1.0:
+        scale = 1.0 / event_total
+        p_clean *= scale
+        p_distressed *= scale
+        p_partnership *= scale
+        p_debt *= scale
+        p_cash *= scale
+
+    p_any = _clamp_prob(p_clean + p_distressed + p_partnership + p_debt + p_cash)
+    p_pressure = _clamp_prob(p_distressed + p_cash + p_program)
+    p_dilutive = _clamp_prob(p_clean + p_distressed)
+    p_nondilutive = _clamp_prob(p_partnership + p_debt)
+
+    return valuation_result.model_copy(update={
+        "p_clean_refinancing_before_catalyst": round(_clamp_prob(p_clean), 4),
+        "p_distressed_refinancing_before_catalyst": round(_clamp_prob(p_distressed), 4),
+        "p_partnership_before_catalyst": round(_clamp_prob(p_partnership), 4),
+        "p_debt_or_royalty_before_catalyst": round(_clamp_prob(p_debt), 4),
+        "p_cash_exhaustion_before_catalyst": round(_clamp_prob(p_cash), 4),
+        "p_program_discontinuation_before_catalyst": round(_clamp_prob(p_program), 4),
         "p_any_financing_event_before_catalyst": round(p_any, 4),
         "p_financing_pressure_before_catalyst": round(p_pressure, 4),
         "p_nondilutive_financing_before_catalyst": round(p_nondilutive, 4),
@@ -1037,6 +1093,36 @@ def run_full_audit(
         t_sci, t_fin, pos_samples, valuation, streams.valuation,
         market_condition_score=float(financial.biotech_market_condition_score),
         config=config,
+    )
+    strategy_result = estimate_financing_strategy(
+        months_to_catalyst=milestone_result.public_readout_months,
+        simple_runway_months=solvency_result.simple_runway_months,
+        market_cap=financial.market_cap,
+        market_condition_score=financial.biotech_market_condition_score,
+        trial_phase=clinical.trial_phase,
+        posterior_pos=pos_result.posterior_mean,
+        catalyst_type=clinical.catalyst_type,
+        recent_positive_signal=bool(pos_input.positive_signals),
+        partnerability_score=0.0,
+    )
+    discontinuation_result = estimate_program_discontinuation(
+        modality=pos_input.modality,
+        disease_area=pos_input.disease_area or clinical.indication,
+        trial_phase=clinical.trial_phase,
+        trial_status=clinical.trial_status,
+        endpoint_family=pos_input.endpoint_family,
+        prior_human_signal=bool(pos_input.positive_signals),
+        open_label_design="open_label" in pos_input.negative_signals,
+        small_sample_size="small_sample_size" in pos_input.negative_signals,
+        single_asset_dependency=financial.pipeline_concentration_score,
+        clinical_hold_or_safety_pause=clinical.trial_status in {"suspended", "terminated", "withdrawn"},
+        cash_runway_months=solvency_result.simple_runway_months,
+        posterior_pos=pos_result.posterior_mean,
+    )
+    val_result = _apply_heuristic_event_taxonomy(
+        val_result,
+        strategy_result,
+        discontinuation_result,
     )
     val_result = _apply_planned_financing_state_probabilities(
         val_result,
