@@ -14,39 +14,6 @@ from app.engines.monte_carlo import run_full_audit
 
 
 # ---------------------------------------------------------------------------
-# Module-scoped fixture for TestAdvancedMathIntegration
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def adv_math_audit():
-    from app.models.schemas import (
-        AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
-        DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
-    )
-    return run_full_audit(AuditRequest(
-        financial=CompanyFinancialInput(
-            company_name="AdvCo", ticker="ADV",
-            cash_on_hand=20_000_000, marketable_securities=0,
-            quarterly_operating_cash_burn=4_000_000, market_cap=70_000_000,
-        ),
-        clinical=ClinicalCatalystInput(
-            asset_name="ADV-01", indication="Cardiology",
-            trial_phase="phase_2", trial_status="recruiting",
-            stated_months_to_catalyst=18,
-            enrollment_target=90, enrollment_completed=30,
-            enrollment_rate_per_month=5, number_of_sites=8,
-        ),
-        success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
-        valuation=ValuationInput(asset_value_success=250_000_000),
-        disclosure=DisclosureInput(
-            company_narrative_distribution={"runway_strength": 0.6, "clinical_timeline_confidence": 0.6, "dilution_risk": 0.4, "trial_maturity": 0.5, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
-            structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
-        ),
-        simulation=SimulationConfig(n_simulations=400, random_seed=42, monthly_horizon=24),
-    ))
-
-
-# ---------------------------------------------------------------------------
 # Distributional robustness
 # ---------------------------------------------------------------------------
 
@@ -222,33 +189,72 @@ class TestCopulaUnit:
 # ---------------------------------------------------------------------------
 
 class TestAdvancedMathIntegration:
-    def test_robustness_populated(self, adv_math_audit):
-        assert adv_math_audit.robustness is not None
+    def _request(self, n: int = 400):
+        from app.models.schemas import (
+            AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
+            DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
+        )
+        return AuditRequest(
+            financial=CompanyFinancialInput(
+                company_name="AdvCo", ticker="ADV",
+                cash_on_hand=20_000_000, marketable_securities=0,
+                quarterly_operating_cash_burn=4_000_000, market_cap=70_000_000,
+            ),
+            clinical=ClinicalCatalystInput(
+                asset_name="ADV-01", indication="Cardiology",
+                trial_phase="phase_2", trial_status="recruiting",
+                stated_months_to_catalyst=18,
+                enrollment_target=90, enrollment_completed=30,
+                enrollment_rate_per_month=5, number_of_sites=8,
+            ),
+            success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
+            valuation=ValuationInput(asset_value_success=250_000_000),
+            disclosure=DisclosureInput(
+                company_narrative_distribution={"runway_strength": 0.6, "clinical_timeline_confidence": 0.6, "dilution_risk": 0.4, "trial_maturity": 0.5, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
+                structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.3},
+            ),
+            simulation=SimulationConfig(n_simulations=n, random_seed=42, monthly_horizon=24),
+        )
 
-    def test_bma_populated(self, adv_math_audit):
-        assert adv_math_audit.bma is not None
+    @pytest.fixture(scope="class")
+    def audit_result(self):
+        return run_full_audit(TestAdvancedMathIntegration()._request(n=300))
 
-    def test_dependence_populated(self, adv_math_audit):
-        assert adv_math_audit.dependence is not None
+    def test_robustness_populated(self, audit_result):
+        r = audit_result
+        assert r.robustness is not None
 
-    def test_dro_report_section_present(self, adv_math_audit):
-        assert "Distributional Robustness" in adv_math_audit.markdown_report
+    def test_bma_populated(self, audit_result):
+        r = audit_result
+        assert r.bma is not None
 
-    def test_bma_report_section_present(self, adv_math_audit):
-        assert "Bayesian Model Averaging" in adv_math_audit.markdown_report
+    def test_dependence_populated(self, audit_result):
+        r = audit_result
+        assert r.dependence is not None
 
-    def test_dependence_report_section_present(self, adv_math_audit):
-        assert "Copula Dependence" in adv_math_audit.markdown_report
+    def test_dro_report_section_present(self, audit_result):
+        r = audit_result
+        assert "Distributional Robustness" in r.markdown_report
 
-    def test_robustness_worst_case_ge_nominal(self, adv_math_audit):
-        assert adv_math_audit.robustness.worst_case_cashout_prob_e10 >= adv_math_audit.robustness.nominal_cashout_prob
+    def test_bma_report_section_present(self, audit_result):
+        r = audit_result
+        assert "Bayesian Model Averaging" in r.markdown_report
 
-    def test_bma_weights_sum_to_one(self, adv_math_audit):
-        total = sum(mw.posterior_weight for mw in adv_math_audit.bma.model_weights)
+    def test_dependence_report_section_present(self, audit_result):
+        r = audit_result
+        assert "Copula Dependence" in r.markdown_report
+
+    def test_robustness_worst_case_ge_nominal(self, audit_result):
+        r = audit_result
+        assert r.robustness.worst_case_cashout_prob_e10 >= r.robustness.nominal_cashout_prob
+
+    def test_bma_weights_sum_to_one(self, audit_result):
+        r = audit_result
+        total = sum(mw.posterior_weight for mw in r.bma.model_weights)
         assert abs(total - 1.0) < 0.01
 
-    def test_advanced_results_include_method_status(self, adv_math_audit):
-        r = adv_math_audit
+    def test_advanced_results_include_method_status(self, audit_result):
+        r = audit_result
         advanced_results = [
             r.value_of_information,
             r.real_options,
@@ -258,6 +264,7 @@ class TestAdvancedMathIntegration:
             r.dependence,
             r.state_space,
         ]
+
         for result in advanced_results:
             assert result.method_status in {
                 "calibrated",
@@ -266,5 +273,6 @@ class TestAdvancedMathIntegration:
                 "experimental_scaffold",
             }
 
-    def test_report_displays_method_status(self, adv_math_audit):
-        assert "Method Status" in adv_math_audit.markdown_report
+    def test_report_displays_method_status(self, audit_result):
+        r = audit_result
+        assert "Method Status" in r.markdown_report

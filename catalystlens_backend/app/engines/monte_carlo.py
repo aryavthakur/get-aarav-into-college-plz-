@@ -880,7 +880,7 @@ def _build_validation_snapshot() -> ValidationSnapshot:
         timing_interval_coverage_status="not_available",
         notes=[
             "No historical labeled training dataset supplied; calibration metrics are unavailable.",
-            "Outputs remain assumption-based research-mode estimates, not validated predictions.",
+            "Outputs remain heuristic, uncalibrated research-mode estimates.",
         ],
     )
 
@@ -1136,7 +1136,7 @@ def run_full_audit(
     )
 
     # ---- Step 9: Scenario analysis ----
-    n_scen = config.scenario_n_simulations
+    n_scen = min(config.scenario_n_simulations, max(100, n // 2))
     base_ev = val_result.financing_adjusted_rnpv
     scenarios: List[ScenarioResult] = []
     for sc_def in _SCENARIOS:
@@ -1147,7 +1147,7 @@ def run_full_audit(
         scenarios.append(sc_result)
 
     # ---- Step 10: Sensitivity analysis ----
-    n_sens = config.sensitivity_n_simulations
+    n_sens = min(config.sensitivity_n_simulations, max(100, n // 2))
     base_cashout = ctc_result.probability_cashout_before_catalyst
     sensitivity: List[SensitivityPoint] = []
     for var_idx, var_def in enumerate(_SENSITIVITY_VARS):

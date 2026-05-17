@@ -27,22 +27,6 @@ from training.datasets.build_company_panel import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Module-scoped fixtures for field-presence / report-section tests
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def default_audit():
-    """Single run of run_full_audit(_request()) shared across multiple test classes."""
-    return run_full_audit(_request())
-
-
-@pytest.fixture(scope="module")
-def crn_audit():
-    """Shared run for CRN sensitivity tests (cash=50M, burn=9M, n=2000)."""
-    return run_full_audit(_request(cash=50_000_000, burn=9_000_000, n=2000))
-
-
 def _request(
     cash: float = 2_000_000,
     burn: float = 6_000_000,
@@ -160,6 +144,25 @@ class TestCashPathCapIntegration:
         assert result.valuation.p_partnership_before_catalyst == pytest.approx(1.0)
         assert result.valuation.p_nondilutive_financing_before_catalyst == pytest.approx(1.0)
 
+    def test_planned_debt_or_royalty_before_catalyst_sets_nondilutive_event_probability(self):
+        result = run_full_audit(
+            _request(events=[FinancingEventInput(month=3, kind="debt_or_royalty", gross_proceeds=10_000_000)])
+        )
+        val = result.valuation
+
+        assert val.p_debt_or_royalty_before_catalyst == pytest.approx(1.0)
+        assert val.p_nondilutive_financing_before_catalyst == pytest.approx(1.0)
+        assert val.p_any_financing_event_before_catalyst == pytest.approx(1.0)
+        assert val.p_financing_pressure_before_catalyst == pytest.approx(
+            min(
+                1.0,
+                val.p_distressed_refinancing_before_catalyst
+                + val.p_cash_exhaustion_before_catalyst
+                + val.p_program_discontinuation_before_catalyst,
+            ),
+            abs=1e-4,
+        )
+
     def test_planned_clean_refi_before_catalyst_sets_clean_probability(self):
         result = run_full_audit(
             _request(events=[FinancingEventInput(month=3, kind="clean_refi", gross_proceeds=10_000_000)])
@@ -173,6 +176,7 @@ class TestCashPathCapIntegration:
             _request(cash=80_000_000, burn=6_000_000, events=[
                 FinancingEventInput(month=3, kind="clean_refi", gross_proceeds=10_000_000),
                 FinancingEventInput(month=4, kind="partnership", gross_proceeds=10_000_000),
+                FinancingEventInput(month=5, kind="debt_or_royalty", gross_proceeds=10_000_000),
             ])
         )
         val = result.valuation
@@ -197,42 +201,6 @@ class TestCashPathCapIntegration:
         assert result.valuation.p_partnership_before_catalyst == pytest.approx(
             baseline.valuation.p_partnership_before_catalyst
         )
-
-    def test_planned_debt_or_royalty_before_catalyst_sets_probability(self):
-        result = run_full_audit(
-            _request(events=[FinancingEventInput(month=3, kind="debt_or_royalty", gross_proceeds=10_000_000)])
-        )
-
-        assert result.valuation.p_debt_or_royalty_before_catalyst == pytest.approx(1.0)
-
-    def test_planned_debt_or_royalty_included_in_nondilutive_financing(self):
-        result = run_full_audit(
-            _request(events=[FinancingEventInput(month=3, kind="debt_or_royalty", gross_proceeds=10_000_000)])
-        )
-
-        assert result.valuation.p_nondilutive_financing_before_catalyst == pytest.approx(1.0)
-
-    def test_planned_debt_or_royalty_excluded_from_financing_pressure(self):
-        result = run_full_audit(
-            _request(
-                cash=80_000_000,
-                burn=6_000_000,
-                events=[FinancingEventInput(month=3, kind="debt_or_royalty", gross_proceeds=10_000_000)],
-            )
-        )
-        val = result.valuation
-
-        # debt_or_royalty is nondilutive and non-distressed — must not inflate financing pressure
-        assert val.p_financing_pressure_before_catalyst == pytest.approx(
-            min(
-                1.0,
-                val.p_distressed_refinancing_before_catalyst
-                + val.p_cash_exhaustion_before_catalyst
-                + val.p_program_discontinuation_before_catalyst,
-            ),
-            abs=1e-4,
-        )
-        assert val.p_any_financing_event_before_catalyst >= val.p_debt_or_royalty_before_catalyst
 
 
 class TestHierarchicalPoS:
@@ -341,13 +309,28 @@ class TestDataQualityCapsAndReportSections:
 
         assert result.data_quality.overall_completeness <= 0.50
 
-    def test_report_contains_validation_provenance_and_clock_sections(self, default_audit):
-        report = default_audit.markdown_report
+    def test_report_contains_validation_provenance_and_clock_sections(self):
+        result = run_full_audit(_request())
+        report = result.markdown_report
 
         assert "Model Validation Status" in report
         assert "Provenance Appendix" in report
         assert "Financial Clock Decomposition" in report
         assert "manual inputs are unverified" in report
+
+    def test_report_uses_conservative_validation_language(self):
+        result = run_full_audit(_request(n=100))
+        report = result.markdown_report.lower()
+
+        assert "not investment advice" in report
+        assert "heuristic" in report or "uncalibrated" in report
+        for forbidden in (
+            "institutionally validated",
+            "predictive accuracy established",
+            "externally validated",
+            "proven predictive",
+        ):
+            assert forbidden not in report
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +362,7 @@ class TestHierarchicalPoSConsistency:
 
     def test_pos_posterior_matches_valuation_seed(self):
         """Same seed + same inputs must give identical PoS in both report and simulation."""
-        req = _request(n=1000)
+        req = _request(n=2000)
         r1 = run_full_audit(req)
         r2 = run_full_audit(req)
         assert r1.success_probability.posterior_mean == r2.success_probability.posterior_mean
@@ -389,14 +372,16 @@ class TestHierarchicalPoSConsistency:
 class TestMilestoneTimingFloor:
     """p5_months must never be below public_readout_months."""
 
-    def test_p5_not_below_public_readout(self, default_audit):
-        r = default_audit
+    def test_p5_not_below_public_readout(self):
+        req = _request()
+        r = run_full_audit(req)
         assert r.milestone_timing.p5_months >= r.milestone_timing.public_readout_months - 0.01, (
             f"p5_months={r.milestone_timing.p5_months} < public_readout_months={r.milestone_timing.public_readout_months}"
         )
 
-    def test_p50_not_below_public_readout(self, default_audit):
-        r = default_audit
+    def test_p50_not_below_public_readout(self):
+        req = _request()
+        r = run_full_audit(req)
         assert r.milestone_timing.p50_months >= r.milestone_timing.public_readout_months - 0.01
 
     def test_sample_floor_applied(self):
@@ -447,23 +432,29 @@ class TestZeroLiquidityCashPath:
 class TestCatalystMonthInAudit:
     """capital_needed_to_reach_catalyst must not be None in full audit."""
 
-    def test_capital_needed_to_reach_catalyst_populated(self, default_audit):
-        assert default_audit.cash_path.capital_needed_to_reach_catalyst is not None
+    def test_capital_needed_to_reach_catalyst_populated(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert r.cash_path.capital_needed_to_reach_catalyst is not None
 
 
 class TestSensitivityCRN:
     """Sensitivity rows must be monotonic under controlled random numbers."""
 
-    def test_burn_sensitivity_monotonic(self, crn_audit):
+    def test_burn_sensitivity_monotonic(self):
         """Higher burn → higher cashout probability."""
-        burn_sens = next(s for s in crn_audit.final_summary.sensitivity if s.variable == "monthly_burn")
+        req = _request(cash=50_000_000, burn=9_000_000, n=2000)
+        r = run_full_audit(req)
+        burn_sens = next(s for s in r.final_summary.sensitivity if s.variable == "monthly_burn")
         assert burn_sens.low_cashout_prob <= burn_sens.high_cashout_prob, (
             f"Higher burn should raise cashout risk: low={burn_sens.low_cashout_prob}, high={burn_sens.high_cashout_prob}"
         )
 
-    def test_asset_value_sensitivity_monotonic(self, crn_audit):
+    def test_asset_value_sensitivity_monotonic(self):
         """Higher asset value → higher expected value."""
-        av_sens = next(s for s in crn_audit.final_summary.sensitivity if s.variable == "asset_value_success")
+        req = _request(cash=50_000_000, burn=9_000_000, n=2000)
+        r = run_full_audit(req)
+        av_sens = next(s for s in r.final_summary.sensitivity if s.variable == "asset_value_success")
         assert av_sens.low_expected_value <= av_sens.high_expected_value, (
             f"Higher asset value should raise EV: low={av_sens.low_expected_value}, high={av_sens.high_expected_value}"
         )
@@ -480,29 +471,38 @@ class TestSensitivityCRN:
 class TestEvidenceQuality:
     """Evidence quality is separate from completeness."""
 
-    def test_complete_manual_input_has_low_evidence_quality(self, default_audit):
-        assert default_audit.data_quality.overall_completeness > 0.5
-        assert default_audit.data_quality.evidence_quality_score == "low"
+    def test_complete_manual_input_has_low_evidence_quality(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert r.data_quality.overall_completeness > 0.5
+        assert r.data_quality.evidence_quality_score == "low"
 
-    def test_evidence_quality_note_mentions_manual(self, default_audit):
-        assert "manual" in default_audit.data_quality.evidence_quality_note.lower()
+    def test_evidence_quality_note_mentions_manual(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert "manual" in r.data_quality.evidence_quality_note.lower()
 
-    def test_report_shows_evidence_quality(self, default_audit):
-        assert "Evidence Quality" in default_audit.markdown_report
+    def test_report_shows_evidence_quality(self):
+        req = _request()
+        r = run_full_audit(req)
+        assert "Evidence Quality" in r.markdown_report
 
 
 class TestReportUpdates:
     """Verify stale report text was fixed."""
 
-    def test_report_shows_prior_source(self, default_audit):
-        r = default_audit
+    def test_report_shows_prior_source(self):
+        req = _request()
+        r = run_full_audit(req)
         assert "Prior Source" in r.markdown_report or "prior_source" in r.markdown_report.lower()
 
-    def test_report_corrects_partnership_assumption(self, default_audit):
-        r = default_audit
+    def test_report_corrects_partnership_assumption(self):
+        req = _request()
+        r = run_full_audit(req)
         # Old text said partnerships can't be captured; new text says they can be planned
         assert "planned_financing_events" in r.markdown_report or "planned financing" in r.markdown_report.lower()
 
-    def test_report_mentions_data_client_scaffold(self, default_audit):
-        r = default_audit
+    def test_report_mentions_data_client_scaffold(self):
+        req = _request()
+        r = run_full_audit(req)
         assert "scaffold" in r.markdown_report.lower() or "manual" in r.markdown_report.lower()

@@ -482,7 +482,7 @@ diluting existing shareholders in the process.
 
 > **UNCALIBRATED — heuristic candidate features; source verification required.**
 > These estimates are produced by deterministic rules and untrained heuristics.
-> They are NOT validated model outputs. Do not use for investment decisions
+> They are NOT calibrated model outputs. Do not use for investment decisions
 > without independent analyst review.
 
 | Event Type | Heuristic Estimate | Status |

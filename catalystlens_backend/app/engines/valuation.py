@@ -200,8 +200,8 @@ def run_valuation_simulation(
     p_debt_or_royalty = 0.0
     p_cash_exhaustion = 0.0
     p_any_financing = _clamp_prob(p_clean + p_distressed + p_partnership + p_debt_or_royalty + p_cash_exhaustion)
-    p_pressure = _clamp_prob(p_distressed + p_debt_or_royalty + p_cash_exhaustion + p_discontinued)
-    p_nondilutive = _clamp_prob(p_partnership)
+    p_pressure = _clamp_prob(p_distressed + p_cash_exhaustion + p_discontinued)
+    p_nondilutive = _clamp_prob(p_partnership + p_debt_or_royalty)
     p_dilutive = _clamp_prob(p_clean + p_distressed)
 
     return ValuationResult(

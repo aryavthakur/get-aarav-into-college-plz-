@@ -52,7 +52,7 @@ def _ai_error_diagnosis_section(result: BacktestResult) -> str:
     )
     return f"""## AI-Assisted Error Diagnosis
 
-These diagnoses are heuristic AI-assisted diagnosis, not validated causal explanations. Source verification and human review are required before using them for model changes.
+These diagnoses are heuristic AI-assisted diagnosis, not causal explanations. Source verification and human review are required before using them for model changes.
 
 | Diagnosed failure mode | Count |
 |---|---:|

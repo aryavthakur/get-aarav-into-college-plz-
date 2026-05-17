@@ -185,7 +185,7 @@ def run_success_probability_analysis(
             "Beta-binomial Bayesian model with additive signal weight updates.",
             "Signal weights are UNTRAINED MVP ASSUMPTIONS (see config.py).",
             "Hierarchical priors are used when phase/disease/modality/endpoint strata are supplied.",
-            "Posterior PoS is a model estimate, not a validated prediction of approval.",
+            "Posterior PoS is a heuristic model estimate with source verification required.",
             "Unknown signals are neither positive nor negative (absent from update).",
         ],
     )

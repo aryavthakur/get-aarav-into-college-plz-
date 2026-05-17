@@ -281,6 +281,11 @@ class TestClaimExtraction:
 
     @pytest.mark.parametrize("phrase", [
         "The company will discontinue development of ABC-101.",
+        "The board approved a strategic restructuring.",
+        "The company announced a strategic restructuring to discontinue development of ABC-101.",
+        "The company announced a strategic restructuring and pipeline prioritization.",
+        "The company announced a strategic restructuring including pause of enrollment.",
+        "The company announced a strategic restructuring including termination of the study.",
         "The sponsor will pause enrollment in the study.",
         "The sponsor paused enrollment for safety review.",
         "The company will terminate the study after review.",
@@ -329,13 +334,25 @@ class TestHeuristicTaxonomyEngines:
         probs = [
             result.p_proactive_clean_refinancing,
             result.p_partnership_or_nondilutive,
+            result.p_debt_or_royalty,
             result.p_distressed_financing,
             result.p_cash_exhaustion,
             result.p_dilutive_financing,
             result.p_nondilutive_financing,
         ]
         assert all(0.0 <= p <= 1.0 for p in probs)
-        assert result.p_proactive_clean_refinancing + result.p_partnership_or_nondilutive + result.p_distressed_financing + result.p_cash_exhaustion <= 1.0
+        assert (
+            result.p_proactive_clean_refinancing
+            + result.p_partnership_or_nondilutive
+            + result.p_debt_or_royalty
+            + result.p_distressed_financing
+            + result.p_cash_exhaustion
+            <= 1.0
+        )
+        assert result.p_nondilutive_financing == pytest.approx(
+            min(1.0, result.p_partnership_or_nondilutive + result.p_debt_or_royalty),
+            abs=1e-4,
+        )
         assert result.method_status == "heuristic"
 
     def test_program_discontinuation_separates_scientific_and_financial_risk(self):
