@@ -287,9 +287,10 @@ class TestClaimExtraction:
         "The company terminated the study due to futility.",
         "The company will terminate development of ABC-101.",
         "The company terminated development of ABC-101.",
-        "The company announced a strategic restructuring to discontinue development of its pipeline.",
-        "The company completed a strategic restructuring and pipeline prioritization.",
-        "The board approved a strategic restructuring including termination of the trial.",
+        "The company announced a strategic restructuring to discontinue development of ABC-101.",
+        "The company announced a strategic restructuring and pipeline prioritization.",
+        "The company announced a strategic restructuring including pause of enrollment.",
+        "The company announced a strategic restructuring including termination of the study.",
     ])
     def test_extracts_program_discontinuation_variants(self, phrase):
         result = extract_program_discontinuation(phrase)
@@ -303,6 +304,7 @@ class TestClaimExtraction:
         "The company completed a strategic restructuring of its finance department.",
         "The company restructured its lease obligations.",
         "The board approved a strategic restructuring.",
+        "The company announced a strategic restructuring of administrative operations.",
     ])
     def test_program_discontinuation_requires_trial_or_program_context(self, phrase):
         result = extract_program_discontinuation(phrase)

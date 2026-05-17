@@ -446,4 +446,11 @@ class HistoricalSourceVerifiedCatalystExample(BaseModel):
                 "exclusion_reason is required when review_status='excluded'"
             )
 
+        # synthetic rows can never be marked source_verified
+        if self.synthetic_example_only and self.review_status == "source_verified":
+            raise ValueError(
+                "synthetic_example_only rows cannot be marked review_status='source_verified'. "
+                "Synthetic rows must never be used as validation evidence."
+            )
+
         return self
