@@ -341,7 +341,8 @@ class TestModelRegistryValidationMetadata:
 
 
 def test_validation_status_endpoint_reports_research_mode():
-    response = TestClient(app).get("/validation/status")
+    with TestClient(app) as client:
+        response = client.get("/validation/status")
     assert response.status_code == 200
     payload = response.json()
     assert payload["engine_mode"] == "research_mode"
