@@ -23,15 +23,6 @@ from app.models.schemas import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Module-scoped fixture for TestAuditResponseStructure
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def base_audit():
-    return run_full_audit(_make_audit_request(n_simulations=300))
-
-
 def _make_audit_request(
     cash_on_hand: float = 100_000_000,
     quarterly_burn: float = 15_000_000,
@@ -205,7 +196,7 @@ class TestCapitalToCatalystObvious:
             enrollment_completed=100,
             enrollment_target=120,
             enrollment_rate=15,
-            n_simulations=2000,
+            n_simulations=5000,
         )
         result = run_full_audit(request)
         cashout_prob = result.capital_to_catalyst.probability_cashout_before_catalyst
@@ -225,7 +216,7 @@ class TestCapitalToCatalystObvious:
             enrollment_completed=10,
             enrollment_target=200,
             enrollment_rate=3,
-            n_simulations=2000,
+            n_simulations=5000,
             positive_signals=[],
             negative_signals=["small_sample_size", "slow_enrollment", "prior_failed_trials"],
         )
@@ -238,7 +229,7 @@ class TestCapitalToCatalystObvious:
 
 class TestMonteCarloReproducibility:
     def test_same_seed_produces_same_result(self):
-        request = _make_audit_request(n_simulations=500, seed=123)
+        request = _make_audit_request(n_simulations=1000, seed=123)
         result1 = run_full_audit(request)
         result2 = run_full_audit(request)
         assert (
@@ -248,8 +239,8 @@ class TestMonteCarloReproducibility:
         assert result1.valuation.mean_value == result2.valuation.mean_value
 
     def test_different_seed_produces_different_but_close_result(self):
-        req1 = _make_audit_request(n_simulations=2000, seed=1)
-        req2 = _make_audit_request(n_simulations=2000, seed=2)
+        req1 = _make_audit_request(n_simulations=5000, seed=1)
+        req2 = _make_audit_request(n_simulations=5000, seed=2)
         r1 = run_full_audit(req1)
         r2 = run_full_audit(req2)
         # Different seeds → different samples, but results should be close
@@ -259,8 +250,13 @@ class TestMonteCarloReproducibility:
 
 
 class TestAuditResponseStructure:
-    def test_all_required_top_level_fields_present(self, base_audit):
-        result = base_audit
+    @pytest.fixture(scope="class")
+    def audit_result(self):
+        return run_full_audit(_make_audit_request(n_simulations=300))
+
+    def test_all_required_top_level_fields_present(self, audit_result):
+        result = audit_result
+
         assert result.company_name == "TestCo"
         assert result.ticker == "TST"
         assert result.solvency is not None
@@ -275,35 +271,41 @@ class TestAuditResponseStructure:
         assert len(result.assumptions) > 0
         assert len(result.markdown_report) > 100
 
-    def test_probabilities_in_valid_range(self, base_audit):
-        ctc = base_audit.capital_to_catalyst
+    def test_probabilities_in_valid_range(self, audit_result):
+        result = audit_result
+        ctc = result.capital_to_catalyst
         assert 0.0 <= ctc.probability_cashout_before_catalyst <= 1.0
         assert 0.0 <= ctc.probability_reaches_catalyst <= 1.0
 
-    def test_scenarios_generated(self, base_audit):
-        assert len(base_audit.final_summary.scenarios) == 5
-        for sc in base_audit.final_summary.scenarios:
+    def test_scenarios_generated(self, audit_result):
+        result = audit_result
+        assert len(result.final_summary.scenarios) == 5
+        for sc in result.final_summary.scenarios:
             assert 0.0 <= sc.probability_cashout_before_catalyst <= 1.0
 
-    def test_sensitivity_generated(self, base_audit):
-        assert len(base_audit.final_summary.sensitivity) > 0
+    def test_sensitivity_generated(self, audit_result):
+        result = audit_result
+        assert len(result.final_summary.sensitivity) > 0
 
-    def test_markdown_report_contains_key_sections(self, base_audit):
-        report = base_audit.markdown_report
+    def test_markdown_report_contains_key_sections(self, audit_result):
+        result = audit_result
+        report = result.markdown_report
         assert "Executive Investment Summary" in report
         assert "Capital-to-Catalyst" in report
         assert "Bayesian" in report
         assert "Disclaimer" in report or "not investment advice" in report.lower()
 
-    def test_model_version_present_and_valid(self, base_audit):
-        mv = base_audit.model_version
+    def test_model_version_present_and_valid(self, audit_result):
+        result = audit_result
+        mv = result.model_version
         assert mv.backend_version == "0.1.0"
         assert mv.coefficient_set == "mvp_untrained_v1"
         assert mv.n_simulations == 300
         assert len(mv.config_hash) > 0
 
-    def test_data_quality_present_and_valid(self, base_audit):
-        dq = base_audit.data_quality
+    def test_data_quality_present_and_valid(self, audit_result):
+        result = audit_result
+        dq = result.data_quality
         assert 0.0 <= dq.financial_data_completeness <= 1.0
         assert 0.0 <= dq.clinical_data_completeness <= 1.0
         assert 0.0 <= dq.disclosure_data_completeness <= 1.0
@@ -312,8 +314,9 @@ class TestAuditResponseStructure:
 
     def test_data_quality_penalises_missing_burn_history(self):
         """Without burn history, financial completeness should be lower than with history."""
-        req_with = _make_audit_request(n_simulations=300)
-        req_without = _make_audit_request(n_simulations=300)
+        req_with = _make_audit_request(n_simulations=500)
+        req_without = _make_audit_request(n_simulations=500)
+        # Strip burn history
         fin_data = req_without.financial.model_dump()
         fin_data["quarterly_burn_history"] = []
         from app.models.schemas import CompanyFinancialInput
@@ -322,16 +325,18 @@ class TestAuditResponseStructure:
         result_without = run_full_audit(req_without)
         assert result_with.data_quality.financial_data_completeness > result_without.data_quality.financial_data_completeness
 
-    def test_report_contains_data_quality_section(self, base_audit):
-        assert "Data Quality" in base_audit.markdown_report
-        assert "UNCALIBRATED" in base_audit.markdown_report
+    def test_report_contains_data_quality_section(self):
+        request = _make_audit_request(n_simulations=1000)
+        result = run_full_audit(request)
+        assert "Data Quality" in result.markdown_report
+        assert "UNCALIBRATED" in result.markdown_report
 
     def test_report_uses_actual_financing_state_probabilities(self):
         request = _make_audit_request(
             cash_on_hand=12_000_000,
             quarterly_burn=24_000_000,
             stated_months=30,
-            n_simulations=300,
+            n_simulations=3000,
         )
         result = run_full_audit(request)
         report = result.markdown_report
@@ -349,8 +354,8 @@ class TestConfigIsolation:
     """Verify that concurrent requests with different seeds don't contaminate each other."""
 
     def test_different_seeds_produce_independent_results(self):
-        req1 = _make_audit_request(n_simulations=500, seed=10)
-        req2 = _make_audit_request(n_simulations=500, seed=99)
+        req1 = _make_audit_request(n_simulations=2000, seed=10)
+        req2 = _make_audit_request(n_simulations=2000, seed=99)
         r1 = run_full_audit(req1)
         r2 = run_full_audit(req2)
         # Results should differ (different seeds)
@@ -373,7 +378,7 @@ class TestConfigIsolation:
 
     def test_repeated_audits_give_identical_results(self):
         """Ensures no global state mutation between calls."""
-        req = _make_audit_request(n_simulations=500, seed=777)
+        req = _make_audit_request(n_simulations=2000, seed=777)
         r1 = run_full_audit(req)
         r2 = run_full_audit(req)
         assert r1.capital_to_catalyst.probability_cashout_before_catalyst == pytest.approx(
@@ -386,7 +391,7 @@ class TestPoSSensitivityActuallyChanges:
     """PoS sensitivity rows must not be identical to the base case."""
 
     def test_pos_sensitivity_varies_ev(self):
-        request = _make_audit_request(n_simulations=1000)
+        request = _make_audit_request(n_simulations=2000)
         result = run_full_audit(request)
         pos_sens = next(
             (s for s in result.final_summary.sensitivity if s.variable == "posterior_pos"),
@@ -404,7 +409,7 @@ class TestPoSSensitivityActuallyChanges:
 
     def test_pos_sensitivity_varies_cashout_prob(self):
         """PoS sensitivity should not affect cashout probability (PoS ≠ financing risk)."""
-        request = _make_audit_request(n_simulations=1000)
+        request = _make_audit_request(n_simulations=2000)
         result = run_full_audit(request)
         pos_sens = next(
             s for s in result.final_summary.sensitivity if s.variable == "posterior_pos"
@@ -420,7 +425,7 @@ class TestFourStateFinancing:
     """Validate that the four-state financing model behaves correctly."""
 
     def test_financing_state_probs_sum_to_one(self):
-        request = _make_audit_request(n_simulations=300)
+        request = _make_audit_request(n_simulations=5000)
         result = run_full_audit(request)
         v = result.valuation
         total = (
@@ -439,7 +444,7 @@ class TestFourStateFinancing:
             stated_months=12,
             enrollment_completed=100,
             enrollment_target=120,
-            n_simulations=2000,
+            n_simulations=5000,
         )
         result = run_full_audit(request)
         assert result.valuation.p_funded_through_catalyst > 0.50
@@ -453,7 +458,7 @@ class TestFourStateFinancing:
             enrollment_completed=5,
             enrollment_target=200,
             enrollment_rate=2,
-            n_simulations=2000,
+            n_simulations=5000,
             positive_signals=[],
             negative_signals=["small_sample_size", "prior_failed_trials"],
         )

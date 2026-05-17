@@ -17,11 +17,11 @@ def _clamp(value: float) -> float:
 class FinancingStrategyResult(BaseModel):
     p_proactive_clean_refinancing: float = Field(ge=0.0, le=1.0)
     p_partnership_or_nondilutive: float = Field(ge=0.0, le=1.0)
+    p_debt_or_royalty: float = Field(ge=0.0, le=1.0)
     p_distressed_financing: float = Field(ge=0.0, le=1.0)
     p_cash_exhaustion: float = Field(ge=0.0, le=1.0)
     p_dilutive_financing: float = Field(ge=0.0, le=1.0)
     p_nondilutive_financing: float = Field(ge=0.0, le=1.0)
-    p_debt_or_royalty: float = Field(ge=0.0, le=1.0)
     method_status: str = "heuristic"
 
 
@@ -65,6 +65,17 @@ def estimate_financing_strategy(
         + 0.05 * bool(recent_positive_signal)
     )
 
+    debt_or_royalty = (
+        0.03
+        + 0.16 * cap_norm
+        + 0.12 * market_norm
+        + 0.10 * (phase in {"phase_2", "phase_3", "filed"})
+        + 0.08 * pos
+        + 0.06 * ("approval" in catalyst or "regulatory" in catalyst or "readout" in catalyst)
+        + 0.05 * _clamp(float(simple_runway_months) / max(float(months_to_catalyst), 1.0))
+        - 0.08 * _clamp(runway_gap / 12.0)
+    )
+
     distressed = (
         0.04
         + 0.10 * (runway_gap > 0)
@@ -80,41 +91,27 @@ def estimate_financing_strategy(
         - 0.08 * partnership
     )
 
-    # Heuristic debt/royalty estimate: available for established companies with moderate
-    # runway pressure and decent market conditions. Not distressed-driven.
-    # Bounded away from clean equity (requires specific structure) and distress.
-    debt_royalty = (
-        0.03
-        + 0.10 * cap_norm
-        + 0.07 * market_norm
-        + 0.05 * (phase in {"phase_2", "phase_3"})
-        + 0.04 * (pos >= 0.30)
-        + 0.08 * _clamp((float(simple_runway_months) - float(months_to_catalyst)) / max(float(months_to_catalyst), 1.0) + 0.5)
-    )
-    # Reduce debt/royalty likelihood when already in cash exhaustion territory
-    debt_royalty *= 1.0 - 0.5 * _clamp(runway_gap / 12.0)
-
     clean = _clamp(clean)
     partnership = _clamp(partnership)
+    debt_or_royalty = _clamp(debt_or_royalty)
     distressed = _clamp(distressed)
     cash_exhaustion = _clamp(cash_exhaustion)
-    debt_royalty = _clamp(debt_royalty)
 
-    total = clean + partnership + distressed + cash_exhaustion + debt_royalty
+    total = clean + partnership + debt_or_royalty + distressed + cash_exhaustion
     if total > 1.0:
         scale = 1.0 / total
         clean *= scale
         partnership *= scale
+        debt_or_royalty *= scale
         distressed *= scale
         cash_exhaustion *= scale
-        debt_royalty *= scale
 
     return FinancingStrategyResult(
         p_proactive_clean_refinancing=round(_clamp(clean), 4),
         p_partnership_or_nondilutive=round(_clamp(partnership), 4),
+        p_debt_or_royalty=round(_clamp(debt_or_royalty), 4),
         p_distressed_financing=round(_clamp(distressed), 4),
         p_cash_exhaustion=round(_clamp(cash_exhaustion), 4),
         p_dilutive_financing=round(_clamp(clean + distressed), 4),
-        p_nondilutive_financing=round(_clamp(partnership + debt_royalty), 4),
-        p_debt_or_royalty=round(_clamp(debt_royalty), 4),
+        p_nondilutive_financing=round(_clamp(partnership + debt_or_royalty), 4),
     )

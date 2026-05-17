@@ -81,25 +81,11 @@ def extract_financing_event(text: str) -> AIExtractionResult:
     return _result(text, "financing_event", None, None, 0.1)
 
 
-_PROGRAM_CONTEXT_TERMS = re.compile(
-    r"\b(?:program|trial|study|pipeline|enrollment|development|candidate|asset|compound)\b",
-    flags=re.IGNORECASE,
-)
-
-
 def extract_program_discontinuation(text: str) -> AIExtractionResult:
     lowered = text.lower()
-
-    # Strategic restructuring only matches when nearby program/trial/pipeline context exists.
-    _STRATEGIC_RESTRUCTURING_WITH_CONTEXT = re.compile(
-        r"(strategic restructuring"
-        r"(?:[^.]{0,80}?(?:discontinue|pipeline|program|trial|development|pause|termination|enrollment)[^.]*"
-        r"|[^.]{0,30}))",
-        flags=re.IGNORECASE,
-    )
-
     patterns = [
         r"(discontinue development of [^.]+)",
+        r"(strategic restructuring[^.]{0,120}?(?:discontinue development of|pipeline prioritization|pause(?:d)? (?:of )?enrollment|termination of the study|terminate(?:d)? the study)[^.]*)",
         r"(paus(?:e|ed) enrollment(?:\s+(?:in|of|for)\s+[^.]+)?)",
         r"(terminate(?:d)? the study(?:\s+(?:of|for|in)\s+[^.]+)?)",
         r"(terminate(?:d)? development of [^.]+)",
@@ -108,12 +94,4 @@ def extract_program_discontinuation(text: str) -> AIExtractionResult:
         match = re.search(pattern, lowered, flags=re.IGNORECASE)
         if match:
             return _result(text, "program_discontinuation", match.group(1), "program_discontinuation", 0.8)
-
-    # Strategic restructuring: only match when program/trial/pipeline context is present
-    sr_match = _STRATEGIC_RESTRUCTURING_WITH_CONTEXT.search(lowered)
-    if sr_match:
-        span = sr_match.group(1)
-        if _PROGRAM_CONTEXT_TERMS.search(span):
-            return _result(text, "program_discontinuation", span, "program_discontinuation", 0.8)
-
     return _result(text, "program_discontinuation", None, None, 0.1)

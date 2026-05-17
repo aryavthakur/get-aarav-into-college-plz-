@@ -62,7 +62,7 @@ class ValueOfInformationResult:
         "The decision is a simplified binary invest/pass decision: "
         "invest_value = posterior_pos * upside_value - capital_required; pass_value = 0. "
         "It is not position sizing, hedging, entry-price optimization, or portfolio construction. "
-        "Values are modeled estimates from uncalibrated signal weights, not validated investment accuracy."
+        "Values are modeled estimates from uncalibrated signal weights; source verification is required."
     )
 
 

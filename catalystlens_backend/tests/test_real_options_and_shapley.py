@@ -13,39 +13,6 @@ from app.engines.monte_carlo import run_full_audit
 
 
 # ---------------------------------------------------------------------------
-# Module-scoped fixture for TestRealOptionsShapleyIntegration
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def ro_shapley_audit():
-    from app.models.schemas import (
-        AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
-        DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
-    )
-    return run_full_audit(AuditRequest(
-        financial=CompanyFinancialInput(
-            company_name="OptCo", ticker="OPC",
-            cash_on_hand=25_000_000, marketable_securities=0,
-            quarterly_operating_cash_burn=4_000_000, market_cap=80_000_000,
-        ),
-        clinical=ClinicalCatalystInput(
-            asset_name="OPC-01", indication="Neurology",
-            trial_phase="phase_2", trial_status="recruiting",
-            stated_months_to_catalyst=20,
-            enrollment_target=100, enrollment_completed=35,
-            enrollment_rate_per_month=6, number_of_sites=10,
-        ),
-        success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
-        valuation=ValuationInput(asset_value_success=300_000_000),
-        disclosure=DisclosureInput(
-            company_narrative_distribution={"runway_strength": 0.7, "clinical_timeline_confidence": 0.7, "dilution_risk": 0.3, "trial_maturity": 0.5, "endpoint_strength": 0.6, "pipeline_diversification": 0.4},
-            structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.4},
-        ),
-        simulation=SimulationConfig(n_simulations=400, random_seed=42, monthly_horizon=24),
-    ))
-
-
-# ---------------------------------------------------------------------------
 # Real-options unit tests
 # ---------------------------------------------------------------------------
 
@@ -220,26 +187,63 @@ class TestShapleyUnit:
 # ---------------------------------------------------------------------------
 
 class TestRealOptionsShapleyIntegration:
-    def test_real_options_populated(self, ro_shapley_audit):
-        assert ro_shapley_audit.real_options is not None
+    def _request(self, n: int = 400):
+        from app.models.schemas import (
+            AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
+            DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
+        )
+        return AuditRequest(
+            financial=CompanyFinancialInput(
+                company_name="OptCo", ticker="OPC",
+                cash_on_hand=25_000_000, marketable_securities=0,
+                quarterly_operating_cash_burn=4_000_000, market_cap=80_000_000,
+            ),
+            clinical=ClinicalCatalystInput(
+                asset_name="OPC-01", indication="Neurology",
+                trial_phase="phase_2", trial_status="recruiting",
+                stated_months_to_catalyst=20,
+                enrollment_target=100, enrollment_completed=35,
+                enrollment_rate_per_month=6, number_of_sites=10,
+            ),
+            success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
+            valuation=ValuationInput(asset_value_success=300_000_000),
+            disclosure=DisclosureInput(
+                company_narrative_distribution={"runway_strength": 0.7, "clinical_timeline_confidence": 0.7, "dilution_risk": 0.3, "trial_maturity": 0.5, "endpoint_strength": 0.6, "pipeline_diversification": 0.4},
+                structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.4},
+            ),
+            simulation=SimulationConfig(n_simulations=n, random_seed=42, monthly_horizon=24),
+        )
 
-    def test_real_options_rov_nonnegative(self, ro_shapley_audit):
-        assert ro_shapley_audit.real_options.rov_mean >= 0.0
+    @pytest.fixture(scope="class")
+    def audit_result(self):
+        return run_full_audit(TestRealOptionsShapleyIntegration()._request(n=300))
 
-    def test_audit_uses_phase_aware_real_options_exercise_cost(self, ro_shapley_audit):
-        assert ro_shapley_audit.real_options.exercise_cost > 0.0
-        assert "phase-aware" in " ".join(ro_shapley_audit.real_options.model_assumptions).lower()
+    def test_real_options_populated(self, audit_result):
+        r = audit_result
+        assert r.real_options is not None
 
-    def test_risk_attribution_populated(self, ro_shapley_audit):
-        assert ro_shapley_audit.risk_attribution is not None
+    def test_real_options_rov_nonnegative(self, audit_result):
+        r = audit_result
+        assert r.real_options.rov_mean >= 0.0
 
-    def test_risk_attribution_has_components(self, ro_shapley_audit):
-        assert len(ro_shapley_audit.risk_attribution.components) > 0
+    def test_audit_uses_phase_aware_real_options_exercise_cost(self, audit_result):
+        r = audit_result
+        assert r.real_options.exercise_cost > 0.0
+        assert "phase-aware" in " ".join(r.real_options.model_assumptions).lower()
 
-    def test_report_includes_real_options_section(self, ro_shapley_audit):
-        r = ro_shapley_audit
+    def test_risk_attribution_populated(self, audit_result):
+        r = audit_result
+        assert r.risk_attribution is not None
+
+    def test_risk_attribution_has_components(self, audit_result):
+        r = audit_result
+        assert len(r.risk_attribution.components) > 0
+
+    def test_report_includes_real_options_section(self, audit_result):
+        r = audit_result
         assert "Real-Options Valuation" in r.markdown_report
         assert f"sigma={r.real_options.asset_volatility:.0%}" in r.markdown_report
 
-    def test_report_includes_shapley_section(self, ro_shapley_audit):
-        assert "Shapley Risk Attribution" in ro_shapley_audit.markdown_report
+    def test_report_includes_shapley_section(self, audit_result):
+        r = audit_result
+        assert "Shapley Risk Attribution" in r.markdown_report

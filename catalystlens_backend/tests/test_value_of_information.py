@@ -15,46 +15,6 @@ from app.engines.monte_carlo import run_full_audit
 
 
 # ---------------------------------------------------------------------------
-# Module-scoped fixture for TestVoIInAudit
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def voi_audit():
-    from app.models.schemas import (
-        AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
-        DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
-    )
-    return run_full_audit(AuditRequest(
-        financial=CompanyFinancialInput(
-            company_name="VoICo",
-            ticker="VOI",
-            cash_on_hand=15_000_000,
-            marketable_securities=0,
-            quarterly_operating_cash_burn=4_000_000,
-            market_cap=60_000_000,
-        ),
-        clinical=ClinicalCatalystInput(
-            asset_name="VOI-01",
-            indication="Immunology",
-            trial_phase="phase_2",
-            trial_status="recruiting",
-            stated_months_to_catalyst=18,
-            enrollment_target=60,
-            enrollment_completed=20,
-            enrollment_rate_per_month=4,
-            number_of_sites=6,
-        ),
-        success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
-        valuation=ValuationInput(asset_value_success=150_000_000),
-        disclosure=DisclosureInput(
-            company_narrative_distribution={"runway_strength": 0.7, "clinical_timeline_confidence": 0.7, "dilution_risk": 0.3, "trial_maturity": 0.5, "endpoint_strength": 0.6, "pipeline_diversification": 0.4},
-            structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.4},
-        ),
-        simulation=SimulationConfig(n_simulations=300, random_seed=42, monthly_horizon=24),
-    ))
-
-
-# ---------------------------------------------------------------------------
 # Unit tests for EVPI
 # ---------------------------------------------------------------------------
 
@@ -217,23 +177,67 @@ class TestRunVoI:
 # ---------------------------------------------------------------------------
 
 class TestVoIInAudit:
-    def test_voi_populated_in_audit(self, voi_audit):
-        assert voi_audit.value_of_information is not None
+    def _request(self, n: int = 300):
+        from app.models.schemas import (
+            AuditRequest, ClinicalCatalystInput, CompanyFinancialInput,
+            DisclosureInput, SimulationConfig, SuccessProbabilityInput, ValuationInput,
+        )
+        return AuditRequest(
+            financial=CompanyFinancialInput(
+                company_name="VoICo",
+                ticker="VOI",
+                cash_on_hand=15_000_000,
+                marketable_securities=0,
+                quarterly_operating_cash_burn=4_000_000,
+                market_cap=60_000_000,
+            ),
+            clinical=ClinicalCatalystInput(
+                asset_name="VOI-01",
+                indication="Immunology",
+                trial_phase="phase_2",
+                trial_status="recruiting",
+                stated_months_to_catalyst=18,
+                enrollment_target=60,
+                enrollment_completed=20,
+                enrollment_rate_per_month=4,
+                number_of_sites=6,
+            ),
+            success_probability=SuccessProbabilityInput(trial_phase="phase_2"),
+            valuation=ValuationInput(asset_value_success=150_000_000),
+            disclosure=DisclosureInput(
+                company_narrative_distribution={"runway_strength": 0.7, "clinical_timeline_confidence": 0.7, "dilution_risk": 0.3, "trial_maturity": 0.5, "endpoint_strength": 0.6, "pipeline_diversification": 0.4},
+                structured_audit_distribution={"runway_strength": 0.5, "clinical_timeline_confidence": 0.5, "dilution_risk": 0.5, "trial_maturity": 0.4, "endpoint_strength": 0.5, "pipeline_diversification": 0.4},
+            ),
+            simulation=SimulationConfig(n_simulations=n, random_seed=42, monthly_horizon=24),
+        )
 
-    def test_voi_evpi_nonnegative(self, voi_audit):
-        assert voi_audit.value_of_information.evpi_dollars >= 0.0
+    @pytest.fixture(scope="class")
+    def audit_result(self):
+        return run_full_audit(TestVoIInAudit()._request(n=300))
 
-    def test_voi_has_signals(self, voi_audit):
-        assert len(voi_audit.value_of_information.per_signal_evsi) > 0
+    def test_voi_populated_in_audit(self, audit_result):
+        r = audit_result
+        assert r.value_of_information is not None
 
-    def test_voi_top_priority_nonempty(self, voi_audit):
-        assert len(voi_audit.value_of_information.top_diligence_priority) > 0
+    def test_voi_evpi_nonnegative(self, audit_result):
+        r = audit_result
+        assert r.value_of_information.evpi_dollars >= 0.0
 
-    def test_voi_methodology_note_present(self, voi_audit):
-        assert len(voi_audit.value_of_information.methodology_note) > 10
+    def test_voi_has_signals(self, audit_result):
+        r = audit_result
+        assert len(r.value_of_information.per_signal_evsi) > 0
 
-    def test_voi_methodology_scopes_to_binary_invest_pass(self, voi_audit):
-        note = voi_audit.value_of_information.methodology_note.lower()
-        report = voi_audit.markdown_report.lower()
+    def test_voi_top_priority_nonempty(self, audit_result):
+        r = audit_result
+        assert len(r.value_of_information.top_diligence_priority) > 0
+
+    def test_voi_methodology_note_present(self, audit_result):
+        r = audit_result
+        assert len(r.value_of_information.methodology_note) > 10
+
+    def test_voi_methodology_scopes_to_binary_invest_pass(self, audit_result):
+        r = audit_result
+        note = r.value_of_information.methodology_note.lower()
+        report = r.markdown_report.lower()
         assert "binary invest/pass" in note
         assert "not position sizing" in report
