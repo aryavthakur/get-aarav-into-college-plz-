@@ -4,7 +4,10 @@ CatalystLens FastAPI route definitions.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.registry.model_registry import ModelRegistry
 from app.engines.bayesian_success import run_success_probability_analysis
@@ -29,6 +32,22 @@ from app.models.schemas import (
 )
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# LLM route request models
+# ---------------------------------------------------------------------------
+
+class LambdaAnalyzeRequest(BaseModel):
+    company_name: str
+    ticker: str
+    text: str
+    question: Optional[str] = None
+
+
+class ExtractClaimsRequest(BaseModel):
+    text: str
+    source_url: Optional[str] = None
 
 
 @router.get("/", tags=["status"])
@@ -161,3 +180,65 @@ def simulate(request: AuditRequest) -> AuditResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Internal engine error. See server logs.") from exc
+
+
+# ---------------------------------------------------------------------------
+# LLM-assisted diligence routes
+# GUARDRAIL: These routes never overwrite core model probabilities or
+# provide investment advice.
+# ---------------------------------------------------------------------------
+
+@router.get("/lambda-health", tags=["ai"])
+async def lambda_health():
+    """
+    Return the first available AI provider.
+
+    Does not call any model — only checks key configuration and Ollama
+    reachability.  Returns {"status": "ok", "provider": "..."} or
+    {"status": "unavailable"}.
+    """
+    from app.ai.llm_client import ai_health
+    return await ai_health()
+
+
+@router.post("/lambda-analyze", tags=["ai"])
+async def lambda_analyze(request: LambdaAnalyzeRequest):
+    """
+    Analyze a biotech SEC filing or press release for diligence-relevant claims.
+
+    GUARDRAIL: Does not overwrite core model probabilities or provide
+    investment advice. All outputs labeled llm_assisted_source_review.
+    """
+    from app.ai.llm_analysis import analyze_biotech_context
+    try:
+        return await analyze_biotech_context(
+            company_name=request.company_name,
+            ticker=request.ticker,
+            filing_or_press_text=request.text,
+            question=request.question,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="LLM analysis error. See server logs.") from exc
+
+
+@router.post("/ai/extract-claims", tags=["ai"])
+async def extract_claims(request: ExtractClaimsRequest):
+    """
+    Extract structured claims from a biotech source text using LLM.
+
+    GUARDRAIL: Does not overwrite core model probabilities. All extractions
+    with confidence < 0.70 are flagged requires_human_review=true. Parse
+    failures return a safe error dict.
+    """
+    from app.ai.llm_claim_extraction import llm_extract_claims
+    try:
+        return await llm_extract_claims(
+            text=request.text,
+            source_url=request.source_url,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Claim extraction error. See server logs.") from exc

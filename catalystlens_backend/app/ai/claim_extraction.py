@@ -81,6 +81,26 @@ def extract_financing_event(text: str) -> AIExtractionResult:
     return _result(text, "financing_event", None, None, 0.1)
 
 
+# Terms that confirm a "strategic restructuring" is about a clinical program,
+# not a finance/admin/lease/HR restructuring.
+_STRATEGIC_RESTRUCTURING_CONTEXT = re.compile(
+    r"\b(?:discontinue\s+development|discontinued\s+development|"
+    r"terminate\s+development|terminated\s+development|"
+    r"terminate\s+the\s+study|terminated\s+the\s+study|"
+    r"termination\s+of\s+the\s+study|"
+    r"pause\s+enrollment|paused\s+enrollment|pipeline\s+prioritization|"
+    r"clinical\s+hold|trial|program|study|development|enrollment|asset)\b",
+    flags=re.IGNORECASE,
+)
+
+_STRATEGIC_RESTRUCTURING_SPAN = re.compile(
+    r"(strategic\s+restructuring[^.]{0,100})",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_program_discontinuation(text: str) -> AIExtractionResult:
+    lowered = text.lower()
 def extract_program_discontinuation(text: str) -> AIExtractionResult:
     lowered = text.lower()
     negative_restructuring_context = (
@@ -108,4 +128,14 @@ def extract_program_discontinuation(text: str) -> AIExtractionResult:
         match = re.search(pattern, lowered, flags=re.IGNORECASE)
         if match:
             return _result(text, "program_discontinuation", match.group(1), "program_discontinuation", 0.8)
+
+    # Strategic restructuring: only match when at least one program/clinical
+    # context term appears within the matched span.  Finance/admin/lease
+    # restructurings do not qualify.
+    sr_match = _STRATEGIC_RESTRUCTURING_SPAN.search(lowered)
+    if sr_match:
+        span = sr_match.group(1)
+        if _STRATEGIC_RESTRUCTURING_CONTEXT.search(span):
+            return _result(text, "program_discontinuation", span, "program_discontinuation", 0.8)
+
     return _result(text, "program_discontinuation", None, None, 0.1)

@@ -233,6 +233,15 @@ class SimulationConfig(BaseModel):
             "as heuristic candidate features and do not overwrite core probabilities."
         ),
     )
+    use_llm_source_review: bool = Field(
+        False,
+        description=(
+            "Enable LLM-assisted source-text review. When True and source text is "
+            "supplied via the API, the response includes llm_source_review. Does not "
+            "overwrite core model probabilities, valuation, posterior PoS, or "
+            "financing conclusions."
+        ),
+    )
 
 
 class AuditRequest(BaseModel):
@@ -722,6 +731,14 @@ class AuditResponse(BaseModel):
     dependence: Optional[DependenceAnalysisResult] = None
     state_space: Optional[StateSpaceResult] = None
     ai_feature_enrichment: Optional[AIFeatureEnrichment] = None
+    llm_source_review: Optional[dict] = Field(
+        None,
+        description=(
+            "LLM-assisted source-review output. Only populated when "
+            "use_llm_source_review=True is set in SimulationConfig. Never "
+            "overwrites core model probabilities or investment conclusions."
+        ),
+    )
     warnings: List[str]
     assumptions: List[str]
     markdown_report: str

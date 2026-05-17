@@ -227,6 +227,48 @@ class TestMissingEvidenceFails:
 
 
 # ---------------------------------------------------------------------------
+# Synthetic rows cannot be source_verified
+# ---------------------------------------------------------------------------
+
+class TestSyntheticCannotBeSourceVerified:
+    def test_synthetic_source_verified_medium_fails(self):
+        """synthetic_example_only=True + review_status='source_verified' must fail."""
+        with pytest.raises(ValidationError, match="synthetic_example_only"):
+            HistoricalSourceVerifiedCatalystExample(**_base_kwargs(
+                synthetic_example_only=True,
+                review_status="source_verified",
+                reviewer="analyst_a",
+                label_confidence="medium",
+            ))
+
+    def test_synthetic_source_verified_high_fails(self):
+        with pytest.raises(ValidationError, match="synthetic_example_only"):
+            HistoricalSourceVerifiedCatalystExample(**_base_kwargs(
+                synthetic_example_only=True,
+                review_status="source_verified",
+                reviewer="analyst_b",
+                label_confidence="high",
+            ))
+
+    def test_synthetic_unreviewed_passes(self):
+        row = HistoricalSourceVerifiedCatalystExample(**_base_kwargs(
+            synthetic_example_only=True,
+            review_status="unreviewed",
+            label_confidence="low",
+        ))
+        assert row.synthetic_example_only is True
+
+    def test_real_row_source_verified_medium_passes(self):
+        row = HistoricalSourceVerifiedCatalystExample(**_base_kwargs(
+            synthetic_example_only=False,
+            review_status="source_verified",
+            reviewer="analyst_c",
+            label_confidence="medium",
+        ))
+        assert row.review_status == "source_verified"
+
+
+# ---------------------------------------------------------------------------
 # source_verified requires high or medium label_confidence
 # ---------------------------------------------------------------------------
 
