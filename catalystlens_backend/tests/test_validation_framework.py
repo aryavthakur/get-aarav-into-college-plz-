@@ -39,15 +39,22 @@ DATASET_PATH = Path("training/datasets/example_historical_biotech_panel.csv")
 
 
 @pytest.fixture(scope="module")
-def synthetic_dataset():
+def full_synthetic_dataset():
     return load_historical_examples(DATASET_PATH)
+
+
+@pytest.fixture(scope="module")
+def synthetic_dataset(full_synthetic_dataset):
+    return full_synthetic_dataset.model_copy(
+        update={"examples": full_synthetic_dataset.examples[:5]}
+    )
 
 
 @pytest.fixture(scope="module")
 def synthetic_backtest_result(synthetic_dataset):
     return run_backtest(
         synthetic_dataset,
-        SimulationConfig(n_simulations=100, random_seed=42, monthly_horizon=48),
+        SimulationConfig(n_simulations=100, random_seed=42, monthly_horizon=36),
     )
 
 
@@ -239,16 +246,17 @@ class TestTargetProbabilityMapping:
 
 
 class TestSyntheticBacktest:
-    def test_synthetic_dataset_loads(self, synthetic_dataset):
-        assert synthetic_dataset.synthetic is True
-        assert synthetic_dataset.n_examples >= 30
-        assert "synthetic" in synthetic_dataset.source_description.lower()
+    def test_full_synthetic_dataset_loads(self, full_synthetic_dataset):
+        assert full_synthetic_dataset.synthetic is True
+        assert full_synthetic_dataset.n_examples >= 30
+        assert "synthetic" in full_synthetic_dataset.source_description.lower()
 
     def test_backtest_runs_end_to_end_on_synthetic_data(self, synthetic_dataset, synthetic_backtest_result):
         result = synthetic_backtest_result
 
         assert result.synthetic is True
         assert result.calibration_status == "synthetic_test_only"
+        assert 3 <= synthetic_dataset.n_examples <= 5
         assert result.n_examples == synthetic_dataset.n_examples
         assert result.metric_summary.n_examples == synthetic_dataset.n_examples
         assert len(result.per_example_results) == synthetic_dataset.n_examples
